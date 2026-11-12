@@ -250,6 +250,9 @@ class DesktopGameApp:
             self.state = "HOST_SETUP"
         elif action == "JOIN_SETUP":
             self.active_field = "ip"
+            # Поле очищаем: друг должен ввести адрес, который прислал хост.
+            self.ip_input = ""
+            self.port_input = str(DEFAULT_PORT)
             self.state = "JOIN_SETUP"
         elif action == "PRACTICE_DRONE":
             self._start_local_practice("drone")
@@ -796,18 +799,24 @@ class DesktopGameApp:
         else:
             ip_sel = self.active_field == "ip"
             lbl = self.renderer.font_md.render(
-                f"IP-адрес Хоста:  [{self.ip_input}{'_' if ip_sel else ''}]",
+                f"Адрес Хоста:  [{self.ip_input}{'_' if ip_sel else ''}]",
                 True,
                 (255, 230, 110) if ip_sel else (215, 225, 238),
             )
             self.screen.blit(lbl, (px + 36, y))
-            y += 46
+            y += 40
             hint = self.renderer.font_xs.render(
-                "Можно вписать адрес целиком с портом: 192.168.1.50:27015  или  bore.pub:49152",
+                "Впишите адрес, который прислал хост. Можно целиком с портом:",
                 True, (150, 180, 205),
             )
-            self.screen.blit(hint, (px + 36, y - 30))
-            y += 16
+            self.screen.blit(hint, (px + 36, y))
+            y += 18
+            for example in ("192.168.1.50:27015    (одна Wi-Fi сеть)",
+                            "bore.pub:49152            (через интернет)"):
+                row = self.renderer.font_xs.render(f"     например:  {example}", True, (135, 165, 195))
+                self.screen.blit(row, (px + 36, y))
+                y += 18
+            y += 10
 
         port_sel = is_host or self.active_field == "port"
         plbl = self.renderer.font_md.render(
@@ -858,9 +867,6 @@ class DesktopGameApp:
             ping_lbl = self.renderer.font_xs.render(net_info, True, (150, 220, 255))
             self.screen.blit(ping_lbl, (self.screen.get_width() - ping_lbl.get_width() - 16, 48))
 
-        if self.state == "GAME_NET" and self.hosted_server is not None:
-            self._render_host_address_panel()
-
         if self.sim.phase != "ACTIVE_ROUND":
             self.renderer.draw_phase_overlay(self.screen, self.sim, self.my_role, net_status=net_info)
         elif not self.mouse_captured:
@@ -871,34 +877,38 @@ class DesktopGameApp:
             )
             self.screen.blit(hint, (self.screen.get_width() // 2 - hint.get_width() // 2, 76))
 
+        # Панель адреса рисуется последней, чтобы её не перекрывал оверлей
+        # выбора модификаторов - хозяин должен видеть адрес всегда.
+        if self.state == "GAME_NET" and self.hosted_server is not None:
+            self._render_host_address_panel()
+
     def _render_host_address_panel(self) -> None:
         """Панель «что вписать другу» - видна хозяину во время сетевого матча."""
         w, h = self.screen.get_size()
-        panel_w = 430
-        panel_h = 46 + 26 * max(1, len(self.host_addresses))
-        px, py = 16, h - panel_h - 16
+        panel_w = 236
+        rows = max(1, len(self.host_addresses))
+        panel_h = 26 + 17 * rows
+        px, py = 14, h - panel_h - 12
         panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-        panel.fill((10, 16, 26, 215))
+        panel.fill((8, 14, 22, 240))
         self.screen.blit(panel, (px, py))
         pygame.draw.rect(self.screen, (70, 150, 110), (px, py, panel_w, panel_h), 2)
 
-        ttl = self.renderer.font_sm.render("Друг подключается по адресу:", True, (125, 235, 165))
-        self.screen.blit(ttl, (px + 12, py + 8))
+        ttl = self.renderer.font_xs.render("ДРУГ ПОДКЛЮЧАЕТСЯ ПО АДРЕСУ:", True, (125, 235, 165))
+        self.screen.blit(ttl, (px + 8, py + 6))
 
-        y = py + 30
+        y = py + 24
         if not self.host_addresses:
             txt = self.renderer.font_xs.render(
-                (self.auto_host_status or "Настраиваем доступ извне...")[:64],
+                (self.auto_host_status or "Настраиваем доступ извне...")[:32],
                 True, (215, 200, 140),
             )
-            self.screen.blit(txt, (px + 12, y))
+            self.screen.blit(txt, (px + 8, y))
         else:
-            for label, address in self.host_addresses[:3]:
+            for _label, address in self.host_addresses[:3]:
                 row = self.renderer.font_xs.render(f"{address}", True, (255, 235, 140))
-                self.screen.blit(row, (px + 12, y))
-                sub = self.renderer.font_xs.render(f"    {label}", True, (150, 190, 215))
-                self.screen.blit(sub, (px + 12, y + 12))
-                y += 26
+                self.screen.blit(row, (px + 8, y))
+                y += 17
 
     def _render_verify_mode(self) -> None:
         w, h = self.screen.get_size()

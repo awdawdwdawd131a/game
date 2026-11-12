@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import re
 import socket
 import ssl
+import subprocess
 import threading
 import time
 import urllib.request
@@ -691,6 +694,139 @@ class BoreTunnel:
 
 
 # ---------------------------------------------------------------------------
+# Запасной вариант: туннель через SSH (Pinggy, бесплатно, без регистрации)
+# ---------------------------------------------------------------------------
+
+
+class SshTunnel:
+    """
+    TCP-туннель через системный SSH-клиент и бесплатный сервис Pinggy.
+
+    Используется, если UPnP недоступен и bore.pub не отвечает.
+    Ничего устанавливать не нужно: OpenSSH-клиент входит в состав
+    Windows 10/11 и всех Linux/macOS. Регистрация и премиум не нужны.
+
+        ssh -p 443 -R0:127.0.0.1:<порт> tcp@free.pinggy.io
+
+    Сервис отвечает строкой вида
+        tcp://xxxxx.a.free.pinggy.link:42289
+    из которой берётся публичный адрес для друга.
+    """
+
+    HOST = "free.pinggy.io"
+    PORT = 443
+    USER = "tcp"
+
+    def __init__(self, local_host: str = "127.0.0.1") -> None:
+        self.local_host = local_host
+        self.local_port = 0
+        self.public_address = ""
+        self.error = ""
+        self.state = "idle"
+        self._proc: Optional[subprocess.Popen] = None
+        self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def ssh_available() -> bool:
+        try:
+            import shutil
+
+            return shutil.which("ssh") is not None
+        except Exception:
+            return False
+
+    def start(self, local_port: int, timeout: float = 25.0) -> bool:
+        if not self.ssh_available():
+            self.error = "На компьютере нет SSH-клиента (ssh)."
+            return False
+
+        self.local_port = local_port
+        self.error = ""
+        self.state = "connecting"
+
+        cmd = [
+            "ssh",
+            "-p", str(self.PORT),
+            "-R", f"0:{self.local_host}:{local_port}",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", f"UserKnownHostsFile={os.devnull}",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=30",
+            f"{self.USER}@{self.HOST}",
+        ]
+
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            self.error = f"Не удалось запустить ssh ({exc})"
+            self.state = "failed"
+            return False
+
+        self._thread = threading.Thread(target=self._read_output, daemon=True, name="SshTunnel")
+        self._thread.start()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.public_address:
+                self.state = "connected"
+                return True
+            if self._proc.poll() is not None:
+                break
+            time.sleep(0.2)
+
+        if not self.public_address:
+            self.state = "failed"
+            if not self.error:
+                self.error = "SSH-туннель не выдал публичный адрес."
+            self.stop()
+            return False
+        self.state = "connected"
+        return True
+
+    def _read_output(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                if self.public_address:
+                    continue
+                match = re.search(r"tcp://([A-Za-z0-9._-]+):(\d+)", line)
+                if match:
+                    self.public_address = f"{match.group(1)}:{match.group(2)}"
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self.state = "stopped"
+        self.public_address = ""
+
+    @property
+    def running(self) -> bool:
+        return self.state == "connected" and bool(self.public_address)
+
+
+# ---------------------------------------------------------------------------
 # Оркестратор: автоматический подбор доступного способа подключения
 # ---------------------------------------------------------------------------
 
@@ -712,6 +848,7 @@ class AutoHostSetup:
         self.local_ip = local_ip or _primary_lan_ip()
         self.on_update = on_update
         self.tunnel = BoreTunnel()
+        self.ssh_tunnel = SshTunnel()
         self.addresses: List[Tuple[str, str]] = []   # (подпись, адрес)
         self.status = "Ожидание..."
         self.done = False
@@ -737,6 +874,7 @@ class AutoHostSetup:
 
     def stop(self) -> None:
         self.tunnel.stop()
+        self.ssh_tunnel.stop()
 
     def _run(self) -> None:
         # --- Шаг 1: UPnP ---------------------------------------------------
@@ -773,9 +911,24 @@ class AutoHostSetup:
                 self.addresses.append(("Бесплатный туннель (bore.pub)", self.tunnel.public_address))
                 self.status = "Туннель работает."
             else:
-                self.status = (
-                    "Автоматический доступ не настроен. "
-                    "Проверьте интернет или подключитесь к одной Wi-Fi сети."
-                )
+                self.status = "bore.pub недоступен - пробуем запасной туннель (SSH)."
+                self._notify()
+                # --- Шаг 3: запасной туннель через SSH ------------------------
+                try:
+                    ok2 = self.ssh_tunnel.start(self.port)
+                except Exception as exc:  # noqa: BLE001
+                    ok2 = False
+                    self.ssh_tunnel.error = str(exc)
+                if ok2 and self.ssh_tunnel.public_address:
+                    self.addresses.append(
+                        ("Запасной бесплатный туннель (SSH)", self.ssh_tunnel.public_address)
+                    )
+                    self.status = "Запасной туннель работает."
+                else:
+                    self.status = (
+                        "Автоматический доступ из интернета не настроен. "
+                        "Проверьте интернет на этом ПК или подключитесь к одной "
+                        "Wi-Fi сети с другом и используйте локальный адрес."
+                    )
         self.done = True
         self._notify()

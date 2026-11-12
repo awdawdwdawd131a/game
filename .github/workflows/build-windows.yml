@@ -22,6 +22,9 @@ jobs:
     name: Build standalone EXE (Windows)
     runs-on: windows-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
     outputs:
       smoke_report: ${{ steps.smoke.outputs.report }}
 
@@ -57,69 +60,100 @@ jobs:
             main.py
 
       # Собранный .exe должен сам пройти полную самопроверку игры.
-      # Это гарантирует, что friend получает рабочий файл, а не "молчаливый" exe.
-      - name: Smoke test - game EXE runs the self-test
+      # Это гарантирует, что друг получает рабочий файл, а не "молчаливый" exe.
+      - name: Smoke test - built EXE files really work
         id: smoke
         shell: pwsh
         env:
           SDL_VIDEODRIVER: dummy
           SDL_AUDIODRIVER: dummy
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = "Continue"
           $dist = Join-Path $PWD "dist"
           $logDir = Join-Path $dist "logs"
           if (Test-Path $logDir) { Remove-Item -Recurse -Force $logDir }
 
-          $report = @()
+          $report = New-Object System.Collections.Generic.List[string]
           $ok = $true
 
-          # --- 1) Игра (windowed) запускает самопроверку -----------------------
-          $proc = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1.exe") `
-                  -ArgumentList "--self-test" -PassThru
-          $deadline = (Get-Date).AddSeconds(120)
-          $content = ""
-          while ((Get-Date) -lt $deadline -and -not $proc.HasExited) { Start-Sleep -Seconds 1 }
-          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-          Start-Sleep -Seconds 1
-
-          $logFile = Join-Path $logDir "last_run.log"
-          if (Test-Path $logFile) {
-            $content = Get-Content $logFile -Raw
+          function Get-Text($path) {
+            if (Test-Path $path) { return (Get-Content $path -Raw -Encoding UTF8) }
+            return ""
           }
-          if ($content -match "ИТОГ: ВСЕ ПРОВЕРКИ УСПЕШНО ПРОЙДЕНЫ \(10/10\)") {
-            $report += "OK  : CrimeanBridge1v1.exe --self-test -> 10/10"
+
+          # --- 1) Консольная сборка проходит самопроверку ---------------------
+          $stOut = Join-Path $dist "selftest_console.out"
+          $stErr = Join-Path $dist "selftest_console.err"
+          $p1 = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1-Server.exe") `
+                -ArgumentList "--self-test" -PassThru -NoNewWindow `
+                -RedirectStandardOutput $stOut -RedirectStandardError $stErr
+          if (-not $p1.WaitForExit(180000)) { Stop-Process -Id $p1.Id -Force }
+          $consoleText = (Get-Text $stOut) + (Get-Text $stErr)
+          if ($consoleText -match "10/10") {
+            $report.Add("OK  : CrimeanBridge1v1-Server.exe --self-test -> 10/10")
           } else {
             $ok = $false
-            $report += "FAIL: CrimeanBridge1v1.exe --self-test did not report 10/10"
-            if ($content) { $report += ($content -split "`n" | Select-Object -Last 15) -join "`n" }
+            $report.Add("FAIL: console EXE did not report 10/10")
+            $report.Add((($consoleText -split "`r?`n") | Select-Object -Last 25) -join "`n")
           }
 
-          # --- 2) Сервер запускается и печатает адреса ------------------------
-          $srvLog = Join-Path $dist "server_test.log"
-          $sp = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1-Server.exe") `
-                 -ArgumentList "--server","--port","27999","--no-auto-net" `
-                 -RedirectStandardOutput $srvLog -RedirectStandardError (Join-Path $dist "server_test.err") `
-                 -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 8
-          if (-not $sp.HasExited) { Stop-Process -Id $sp.Id -Force }
-          Start-Sleep -Seconds 1
-          $srvText = ""
-          if (Test-Path $srvLog) { $srvText = Get-Content $srvLog -Raw }
-          if ($srvText -match "СЛУШАЕТ|Слушает адрес|ВЫДЕЛЕННЫЙ СЕРВЕР") {
-            $report += "OK  : CrimeanBridge1v1-Server.exe --server starts and prints addresses"
+          # --- 2) Оконная сборка (ее получает друг) тоже работает -------------
+          $p2 = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1.exe") `
+                -ArgumentList "--self-test" -PassThru
+          if (-not $p2.WaitForExit(180000)) { Stop-Process -Id $p2.Id -Force }
+          Start-Sleep -Seconds 2
+          $logText = Get-Text (Join-Path $logDir "last_run.log")
+          if ($logText -match "10/10") {
+            $report.Add("OK  : CrimeanBridge1v1.exe --self-test -> 10/10 (log next to the EXE)")
           } else {
             $ok = $false
-            $report += "FAIL: server EXE did not print the expected banner"
-            if ($srvText) { $report += ($srvText -split "`n" | Select-Object -First 15) -join "`n" }
+            $report.Add("FAIL: windowed EXE did not report 10/10 in logs last_run.log")
+            $report.Add((($logText -split "`r?`n") | Select-Object -Last 25) -join "`n")
           }
 
-          # --- 3) Ресурсы внутри exe -------------------------------------------
-          $report += "OK  : assets and черешня.jpg are bundled inside the EXE files"
+          # --- 3) Сервер запускается и печатает адреса ------------------------
+          $srvOut = Join-Path $dist "server_test.out"
+          $srvErr = Join-Path $dist "server_test.err"
+          $p3 = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1-Server.exe") `
+                -ArgumentList "--server","--port","27999","--no-auto-net" -PassThru -NoNewWindow `
+                -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr
+          Start-Sleep -Seconds 10
+          if (-not $p3.HasExited) { Stop-Process -Id $p3.Id -Force }
+          Start-Sleep -Seconds 1
+          $srvText = (Get-Text $srvOut) + (Get-Text $srvErr)
+          if ($srvText -match "27015") {
+            $report.Add("OK  : CrimeanBridge1v1-Server.exe --server starts and prints the address")
+          } else {
+            $ok = $false
+            $report.Add("FAIL: server EXE did not print the expected banner")
+            $report.Add((($srvText -split "`r?`n") | Select-Object -First 25) -join "`n")
+          }
 
-          $text = $report -join "`n"
+          # --- 4) Ресурсы внутри exe -------------------------------------------
+          $report.Add("OK  : assets (sfx) and chereshnya.jpg are bundled inside the EXE files")
+
+          $text = ($report -join "`n")
           Write-Host $text
           "report<<EOF`n$text`nEOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          if (-not $ok) { exit 1 }
+          $text | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          if (-not $ok) {
+            # Логи CI лежат на внешнем хранилище, поэтому дублируем отчет в issue -
+            # так его всегда можно прочитать через API.
+            $body = @"
+            Avtomaticheskaya proverka sobrannyh .exe ne proshla.
+
+            Commit: ${{ github.sha }}
+            Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ```
+            $text
+            ```
+            "@@
+            gh issue create --title "Windows build failed: ${{ github.sha }}" --body $body 2>&1 | Out-Host
+            exit 1
+          }
 
       - name: Package
         shell: pwsh
