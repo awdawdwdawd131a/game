@@ -63,16 +63,10 @@ class SoundManager:
     # ------------------------------------------------------------------
     @staticmethod
     def _resolve_assets_dir(repo_root: Optional[str]) -> str:
-        candidates = []
-        if repo_root:
-            candidates.append(os.path.join(repo_root, "assets", "sfx"))
-        here = os.path.dirname(os.path.abspath(__file__))
-        candidates.append(os.path.join(os.path.dirname(here), "assets", "sfx"))
-        candidates.append(os.path.join(os.getcwd(), "assets", "sfx"))
-        for c in candidates:
-            if os.path.isdir(c):
-                return c
-        return ""
+        from .assets import find_dir
+
+        found = find_dir(os.path.join("assets", "sfx"), repo_root or "")
+        return found or ""
 
     @staticmethod
     def _read_wav_mono(path: str) -> Optional[np.ndarray]:

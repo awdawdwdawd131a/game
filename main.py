@@ -203,7 +203,6 @@ def _check_dependencies() -> None:
     for mod, hint in (
         ("pygame", "pygame-ce"),
         ("numpy", "numpy"),
-        ("PIL", "pillow"),
     ):
         try:
             __import__(mod)
@@ -223,7 +222,7 @@ def _check_dependencies() -> None:
 # -----------------------------------------------------------------------------
 # Game modes
 # -----------------------------------------------------------------------------
-def run_headless_server(host: str, port: int, bot_fill: bool) -> int:
+def run_headless_server(host: str, port: int, bot_fill: bool, auto_net: bool = True) -> int:
     from src.config import WEATHER_BY_ID
     from src.network import GameServer, describe_connection_targets
 
@@ -236,8 +235,34 @@ def run_headless_server(host: str, port: int, bot_fill: bool) -> int:
     _safe_print(" Что вписать другу в поле «IP» (выберите тот адрес, по которому он подключается):")
     for t in targets:
         _safe_print(f"    -> {t}")
-    _safe_print("   (26.x.x.x — это Radmin VPN; 192.168.x.x — обычная домашняя сеть)")
+    _safe_print("   (192.168.x.x — обычная домашняя сеть, работает в одной Wi-Fi сети)")
     _safe_print(f" Заполнение пустого слота ИИ-ботом: {'ВКЛ' if bot_fill else 'ВЫКЛ'}")
+    _safe_print("=" * 74)
+
+    # --- Автоматическая настройка доступа извне -----------------------------
+    auto_host = None
+    if auto_net:
+        try:
+            from src.net_setup import AutoHostSetup
+
+            def _on_update(snapshot: dict) -> None:
+                status = snapshot.get("status", "")
+                addrs = snapshot.get("addresses", [])
+                if addrs:
+                    _safe_print("")
+                    _safe_print(" ГОТОВЫЙ АДРЕС ДЛЯ ДРУГА (скопируйте ему):")
+                    for label, address in addrs:
+                        _safe_print(f"    -> {address}    ({label})")
+                    _safe_print("   Друг вставляет этот адрес в поле «IP» и жмёт ENTER.")
+                elif status:
+                    _safe_print(f" [настройка доступа] {status}")
+
+            auto_host = AutoHostSetup(port=bound, on_update=_on_update)
+            auto_host.start()
+            _safe_print(" Настраиваем доступ из интернета (UPnP / бесплатный туннель)...")
+        except Exception as exc:  # noqa: BLE001
+            _safe_print(f" [настройка доступа] не удалось: {exc}")
+
     _safe_print(" Нажмите Ctrl+C для остановки сервера.")
     _safe_print("=" * 74)
 
@@ -265,6 +290,11 @@ def run_headless_server(host: str, port: int, bot_fill: bool) -> int:
             time.sleep(1.0)
     finally:
         _safe_print("\nОстановка сервера...")
+        if auto_host is not None:
+            try:
+                auto_host.stop()
+            except Exception:
+                pass
         srv.stop()
     return 0
 
@@ -324,6 +354,8 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0", help="IP-интерфейс сервера (по умолчанию 0.0.0.0)")
     parser.add_argument("--port", type=int, default=27015, help="TCP порт сервера (по умолчанию 27015)")
     parser.add_argument("--bot-fill", action="store_true", help="На сервере: подставлять ИИ-бота, пока подключён только 1 игрок")
+    parser.add_argument("--no-auto-net", action="store_true",
+                        help="На сервере: не пытаться автоматически открыть порт (UPnP) и поднять туннель")
     parser.add_argument("--verify", action="store_true", help="Открыть настольную игру сразу в Проверочном режиме (Сплит-Скрин + тесты)")
     parser.add_argument("--self-test", action="store_true", help="Выполнить полную автоматическую самопроверку в консоли и выйти")
     parser.add_argument("--save-test-frames", default=None, help="Папка для сохранения проверочных 3D-скриншотов при --self-test")
@@ -337,7 +369,7 @@ def main() -> int:
         return run_cli_self_test(repo_root, args.save_test_frames)
 
     if args.server:
-        return run_headless_server(args.host, args.port, args.bot_fill)
+        return run_headless_server(args.host, args.port, args.bot_fill, auto_net=not args.no_auto_net)
 
     return run_desktop_gui(repo_root, args.width, args.height, "verify" if args.verify else "menu")
 

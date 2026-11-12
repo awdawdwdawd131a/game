@@ -596,8 +596,10 @@ class SceneRenderer3D:
         return pygame.font.Font(None, size)
 
     def _load_chereshnya_thumb(self) -> Optional[pygame.Surface]:
-        img_path = os.path.join(self.repo_root, "черешня.jpg")
-        if os.path.isfile(img_path):
+        from .assets import find_file
+
+        img_path = find_file("черешня.jpg", self.repo_root)
+        if img_path:
             try:
                 raw = pygame.image.load(img_path)
                 return pygame.transform.smoothscale(raw, (68, 58))

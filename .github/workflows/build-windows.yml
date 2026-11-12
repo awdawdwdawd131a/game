@@ -1,0 +1,103 @@
+name: Build Windows EXE
+
+# Сборка полностью автономных .exe файлов на чистой Windows-машине.
+# Другу не нужен ни Python, ни папки проекта - только один файл.
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build standalone EXE (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build EXE files
+        run: |
+          python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed `
+            --name "CrimeanBridge1v1" `
+            --add-data "assets;assets" `
+            --add-data "черешня.jpg;." `
+            --hidden-import "src.net_setup" `
+            main.py
+          python -m PyInstaller --noconfirm --clean --noupx --onefile --console `
+            --name "CrimeanBridge1v1-Server" `
+            --add-data "assets;assets" `
+            --add-data "черешня.jpg;." `
+            --hidden-import "src.net_setup" `
+            main.py
+
+      - name: Smoke test (server starts and prints addresses)
+        shell: cmd
+        run: |
+          cd dist
+          start /B "" CrimeanBridge1v1-Server.exe --server --port 27999 --no-auto-net > server_test.log 2>&1
+          timeout /t 6 /nobreak >nul
+          type server_test.log
+          taskkill /F /IM CrimeanBridge1v1-Server.exe || exit 0
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item dist\CrimeanBridge1v1.exe package\
+          Copy-Item dist\CrimeanBridge1v1-Server.exe package\
+          Copy-Item "черешня.jpg" package\ -ErrorAction SilentlyContinue
+          Copy-Item HOSTING_RU.md package\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path package\* -DestinationPath "CrimeanBridge1v1-Windows.zip" -Force
+          Get-ChildItem package | Format-Table Name, Length
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrimeanBridge1v1-Windows
+          path: |
+            CrimeanBridge1v1-Windows.zip
+            dist/CrimeanBridge1v1.exe
+            dist/CrimeanBridge1v1-Server.exe
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: CrimeanBridge1v1-Windows
+          path: out
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/CrimeanBridge1v1-Windows.zip
