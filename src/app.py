@@ -607,14 +607,15 @@ class DesktopGameApp:
         self.screen.blit(hdr, (18, y0))
 
         ctrl = self.renderer.font_xs.render(
-            "[W] Сменить погоду на лету  |  [SPACE] Пауза 3D-боя  |  [R] Перезапустить тесты  |  [ESC] В меню",
+            "[W] Сменить погоду  |  [SPACE] Пауза боя  |  [R] Перезапустить тесты  |  [ESC] В меню",
             True,
             (185, 208, 235),
         )
-        self.screen.blit(ctrl, (w - ctrl.get_width() - 18, y0 + 4))
+        self.screen.blit(ctrl, (18, y0 + 26))
 
-        row_y = y0 + 32
-        row_h = max(22, (h - row_y - 10) // max(total_cnt, 1))
+        row_y = y0 + 50
+        row_h = max(18, (h - row_y - 8) // max(total_cnt, 1))
+        max_line_w = w - 40
         for r in self.verify_results:
             mark = "[OK]" if r.passed else "[FAIL]"
             mcol = (90, 240, 135) if r.passed else (255, 85, 80)
@@ -623,7 +624,7 @@ class DesktopGameApp:
                 True,
                 mcol,
             )
-            self.screen.blit(line, (22, row_y))
+            self.screen.blit(line, (22, row_y), (0, 0, min(line.get_width(), max_line_w), line.get_height()))
             row_y += row_h
 
     def _render_joystick_screen(self) -> None:
