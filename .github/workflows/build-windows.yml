@@ -122,7 +122,7 @@ jobs:
           if (-not $p3.HasExited) { Stop-Process -Id $p3.Id -Force }
           Start-Sleep -Seconds 1
           $srvText = (Get-Text $srvOut) + (Get-Text $srvErr)
-          if ($srvText -match "27015") {
+          if ($srvText -match "27999" -and $srvText -match "0\.0\.0\.0") {
             $report.Add("OK  : CrimeanBridge1v1-Server.exe --server starts and prints the address")
           } else {
             $ok = $false

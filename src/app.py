@@ -298,17 +298,27 @@ class DesktopGameApp:
             return
 
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            try:
-                port = int(self.port_input.strip() or str(DEFAULT_PORT))
-            except ValueError:
-                self.status_banner = "Некорректный порт! Введите число (например 27015)."
+            if self.state == "HOST_SETUP":
+                try:
+                    port = int(self.port_input.strip() or str(DEFAULT_PORT))
+                except ValueError:
+                    self.status_banner = "Некорректный порт! Введите число (например 27015)."
+                    return
+                self._launch_hosted_match(port)
                 return
 
-            if self.state == "HOST_SETUP":
-                self._launch_hosted_match(port)
+            # Адрес может содержать порт ("bore.pub:49152") - тогда отдельное
+            # поле "порт" игнорируется и даже может быть пустым.
+            host, addr_port = self._parse_address(self.ip_input.strip(), 0)
+            if addr_port:
+                port = addr_port
             else:
-                host, port = self._parse_address(self.ip_input.strip(), port)
-                self._join_remote_match(host, port)
+                try:
+                    port = int(self.port_input.strip() or str(DEFAULT_PORT))
+                except ValueError:
+                    self.status_banner = "Некорректный порт! Введите число (например 27015)."
+                    return
+            self._join_remote_match(host, port)
             return
 
         # Text editing for IP / Port
@@ -335,6 +345,8 @@ class DesktopGameApp:
             192.168.1.50          - адрес + порт из отдельного поля
             192.168.1.50:27015    - адрес с портом
             bore.pub:49152        - бесплатный туннель с портом
+
+        Если порт указан прямо в адресе, он важнее default_port.
         """
         raw = (text or "").strip()
         if not raw:
