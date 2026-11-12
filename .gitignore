@@ -1,0 +1,19 @@
+# Python / virtualenv / caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build / PyInstaller artifacts
+build/
+dist/
+*.spec
+
+# Diagnostic / test output screenshots
+test_output/
+logs/
+*.log
