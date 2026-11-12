@@ -58,6 +58,7 @@ REM  --console / --windowed    -> для сервера нужен видимы�
     --add-data "assets;assets" ^
     --add-data "черешня.jpg;." ^
     --hidden-import "src.net_setup" ^
+    --hidden-import "src.assets" ^
     main.py
 if errorlevel 1 goto build_failed
 
@@ -66,6 +67,7 @@ if errorlevel 1 goto build_failed
     --add-data "assets;assets" ^
     --add-data "черешня.jpg;." ^
     --hidden-import "src.net_setup" ^
+    --hidden-import "src.assets" ^
     main.py
 if errorlevel 1 goto build_failed
 

@@ -90,6 +90,46 @@ class _NullWriter:
         return False
 
 
+class _LogOnlyWriter:
+    """
+    Записывает вывод только в лог-файл (когда консоли нет, но лог нужен).
+
+    В режиме --windowed у exe нет ни консоли, ни stdout, поэтому без этого
+    класса игра запускается «вслепую» и у пользователя нет никакого следа
+    о том, что произошло. Файл logs\last_run.log рядом с .exe решает эту
+    задачу: по нему видно и нормальный запуск, и любую ошибку.
+    """
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, log_file) -> None:
+        self._log = log_file
+
+    def write(self, data: str) -> int:
+        try:
+            self._log.write(data)
+            self._log.flush()
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self) -> None:
+        try:
+            self._log.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+    def fileno(self) -> int:
+        raise OSError("no fileno")
+
+    def writable(self) -> bool:
+        return True
+
+
 def get_repo_root() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
@@ -137,8 +177,13 @@ def _prepare_streams(repo_root: str) -> None:
         log_file = open(log_path, "a", encoding="utf-8", errors="replace")
         if sys.stdout is not None and not isinstance(sys.stdout, _NullWriter):
             sys.stdout = _TeeWriter(sys.stdout, log_file)
+        else:
+            # Консоли нет (--windowed) - пишем только в лог-файл рядом с .exe
+            sys.stdout = _LogOnlyWriter(log_file)
         if sys.stderr is not None and not isinstance(sys.stderr, _NullWriter):
             sys.stderr = _TeeWriter(sys.stderr, log_file)
+        else:
+            sys.stderr = _LogOnlyWriter(log_file)
     except Exception:
         pass
 

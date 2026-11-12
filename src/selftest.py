@@ -22,6 +22,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import pygame
 
+from .assets import find_file
 from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS, WEATHER_PRESETS
 from .controls import InputController, JoystickProfile, apply_deadzone
 from .math3d import forward_from_angles
@@ -58,8 +59,9 @@ def run_verification_suite(
 
     # 1. Check `черешня.jpg` preserved
     def check_chereshnya() -> str:
-        p = os.path.join(repo_root, "черешня.jpg")
-        assert os.path.isfile(p), "Файл черешня.jpg не найден!"
+        # Ищем и рядом с .exe, и внутри собранного бандла (PyInstaller _MEIPASS)
+        p = find_file("черешня.jpg", repo_root)
+        assert p is not None, "Файл черешня.jpg не найден!"
         sz = os.path.getsize(p)
         assert sz > 10_000, f"Некорректный размер файла: {sz}"
         return f"Файл черешня.jpg на месте ({sz} байт)"

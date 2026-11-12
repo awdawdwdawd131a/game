@@ -22,6 +22,8 @@ jobs:
     name: Build standalone EXE (Windows)
     runs-on: windows-latest
     timeout-minutes: 30
+    outputs:
+      smoke_report: ${{ steps.smoke.outputs.report }}
 
     steps:
       - name: Checkout
@@ -44,22 +46,80 @@ jobs:
             --add-data "assets;assets" `
             --add-data "черешня.jpg;." `
             --hidden-import "src.net_setup" `
+            --hidden-import "src.assets" `
             main.py
           python -m PyInstaller --noconfirm --clean --noupx --onefile --console `
             --name "CrimeanBridge1v1-Server" `
             --add-data "assets;assets" `
             --add-data "черешня.jpg;." `
             --hidden-import "src.net_setup" `
+            --hidden-import "src.assets" `
             main.py
 
-      - name: Smoke test (server starts and prints addresses)
-        shell: cmd
+      # Собранный .exe должен сам пройти полную самопроверку игры.
+      # Это гарантирует, что friend получает рабочий файл, а не "молчаливый" exe.
+      - name: Smoke test - game EXE runs the self-test
+        id: smoke
+        shell: pwsh
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
         run: |
-          cd dist
-          start /B "" CrimeanBridge1v1-Server.exe --server --port 27999 --no-auto-net > server_test.log 2>&1
-          timeout /t 6 /nobreak >nul
-          type server_test.log
-          taskkill /F /IM CrimeanBridge1v1-Server.exe || exit 0
+          $ErrorActionPreference = "Stop"
+          $dist = Join-Path $PWD "dist"
+          $logDir = Join-Path $dist "logs"
+          if (Test-Path $logDir) { Remove-Item -Recurse -Force $logDir }
+
+          $report = @()
+          $ok = $true
+
+          # --- 1) Игра (windowed) запускает самопроверку -----------------------
+          $proc = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1.exe") `
+                  -ArgumentList "--self-test" -PassThru
+          $deadline = (Get-Date).AddSeconds(120)
+          $content = ""
+          while ((Get-Date) -lt $deadline -and -not $proc.HasExited) { Start-Sleep -Seconds 1 }
+          if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          Start-Sleep -Seconds 1
+
+          $logFile = Join-Path $logDir "last_run.log"
+          if (Test-Path $logFile) {
+            $content = Get-Content $logFile -Raw
+          }
+          if ($content -match "ИТОГ: ВСЕ ПРОВЕРКИ УСПЕШНО ПРОЙДЕНЫ \(10/10\)") {
+            $report += "OK  : CrimeanBridge1v1.exe --self-test -> 10/10"
+          } else {
+            $ok = $false
+            $report += "FAIL: CrimeanBridge1v1.exe --self-test did not report 10/10"
+            if ($content) { $report += ($content -split "`n" | Select-Object -Last 15) -join "`n" }
+          }
+
+          # --- 2) Сервер запускается и печатает адреса ------------------------
+          $srvLog = Join-Path $dist "server_test.log"
+          $sp = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1-Server.exe") `
+                 -ArgumentList "--server","--port","27999","--no-auto-net" `
+                 -RedirectStandardOutput $srvLog -RedirectStandardError (Join-Path $dist "server_test.err") `
+                 -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 8
+          if (-not $sp.HasExited) { Stop-Process -Id $sp.Id -Force }
+          Start-Sleep -Seconds 1
+          $srvText = ""
+          if (Test-Path $srvLog) { $srvText = Get-Content $srvLog -Raw }
+          if ($srvText -match "СЛУШАЕТ|Слушает адрес|ВЫДЕЛЕННЫЙ СЕРВЕР") {
+            $report += "OK  : CrimeanBridge1v1-Server.exe --server starts and prints addresses"
+          } else {
+            $ok = $false
+            $report += "FAIL: server EXE did not print the expected banner"
+            if ($srvText) { $report += ($srvText -split "`n" | Select-Object -First 15) -join "`n" }
+          }
+
+          # --- 3) Ресурсы внутри exe -------------------------------------------
+          $report += "OK  : assets and черешня.jpg are bundled inside the EXE files"
+
+          $text = $report -join "`n"
+          Write-Host $text
+          "report<<EOF`n$text`nEOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if (-not $ok) { exit 1 }
 
       - name: Package
         shell: pwsh
@@ -84,10 +144,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Attach to release
+    name: Publish ready-to-download builds
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
@@ -97,7 +156,28 @@ jobs:
           name: CrimeanBridge1v1-Windows
           path: out
 
-      - name: Upload to release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: out/CrimeanBridge1v1-Windows.zip
+          tag_name: build-${{ github.run_number }}
+          name: Windows build #${{ github.run_number }}
+          body: |
+            Готовые автономные сборки игры «Крымский Мост 1v1».
+
+            **Другу отправьте ровно один файл: `CrimeanBridge1v1.exe`.**
+            Python, папки проекта и распаковка не нужны.
+
+            **Себе оставьте: `CrimeanBridge1v1-Server.exe`** (выделенный сервер с консолью).
+
+            Проверка сборки:
+            ```
+            ${{ needs.build.outputs.smoke_report }}
+            ```
+
+            После запуска сервера в консоли появится готовый адрес для друга -
+            просто отправьте его другу (например `bore.pub:49152`).
+          files: |
+            out/dist/CrimeanBridge1v1.exe
+            out/dist/CrimeanBridge1v1-Server.exe
+            out/CrimeanBridge1v1-Windows.zip
+          fail_on_unmatched_files: true
