@@ -1,0 +1,219 @@
+name: Build Windows EXE
+
+# Сборка полностью автономных .exe файлов на чистой Windows-машине.
+# Другу не нужен ни Python, ни папки проекта - только один файл.
+on:
+  push:
+    branches:
+      - main
+      - "arena/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build standalone EXE (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      smoke_report: ${{ steps.smoke.outputs.report }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build EXE files
+        run: |
+          python -m PyInstaller --noconfirm --clean --noupx --onefile --windowed `
+            --name "CrimeanBridge1v1" `
+            --add-data "assets;assets" `
+            --add-data "черешня.jpg;." `
+            --hidden-import "src.net_setup" `
+            --hidden-import "src.assets" `
+            main.py
+          python -m PyInstaller --noconfirm --clean --noupx --onefile --console `
+            --name "CrimeanBridge1v1-Server" `
+            --add-data "assets;assets" `
+            --add-data "черешня.jpg;." `
+            --hidden-import "src.net_setup" `
+            --hidden-import "src.assets" `
+            main.py
+
+      # Собранный .exe должен сам пройти полную самопроверку игры.
+      # Это гарантирует, что друг получает рабочий файл, а не "молчаливый" exe.
+      - name: Smoke test - built EXE files really work
+        id: smoke
+        shell: pwsh
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Continue"
+          $dist = Join-Path $PWD "dist"
+          $logDir = Join-Path $dist "logs"
+          if (Test-Path $logDir) { Remove-Item -Recurse -Force $logDir }
+
+          $report = New-Object System.Collections.Generic.List[string]
+          $ok = $true
+
+          function Get-Text($path) {
+            if (Test-Path $path) { return (Get-Content $path -Raw -Encoding UTF8) }
+            return ""
+          }
+
+          # --- 1) Консольная сборка проходит самопроверку ---------------------
+          $stOut = Join-Path $dist "selftest_console.out"
+          $stErr = Join-Path $dist "selftest_console.err"
+          $p1 = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1-Server.exe") `
+                -ArgumentList "--self-test" -PassThru -NoNewWindow `
+                -RedirectStandardOutput $stOut -RedirectStandardError $stErr
+          if (-not $p1.WaitForExit(180000)) { Stop-Process -Id $p1.Id -Force }
+          $consoleText = (Get-Text $stOut) + (Get-Text $stErr)
+          if ($consoleText -match "10/10") {
+            $report.Add("OK  : CrimeanBridge1v1-Server.exe --self-test -> 10/10")
+          } else {
+            $ok = $false
+            $report.Add("FAIL: console EXE did not report 10/10")
+            $report.Add((($consoleText -split "`r?`n") | Select-Object -Last 25) -join "`n")
+          }
+
+          # --- 2) Оконная сборка (ее получает друг) тоже работает -------------
+          $p2 = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1.exe") `
+                -ArgumentList "--self-test" -PassThru
+          if (-not $p2.WaitForExit(180000)) { Stop-Process -Id $p2.Id -Force }
+          Start-Sleep -Seconds 2
+          $logText = Get-Text (Join-Path $logDir "last_run.log")
+          if ($logText -match "10/10") {
+            $report.Add("OK  : CrimeanBridge1v1.exe --self-test -> 10/10 (log next to the EXE)")
+          } else {
+            $ok = $false
+            $report.Add("FAIL: windowed EXE did not report 10/10 in logs last_run.log")
+            $report.Add((($logText -split "`r?`n") | Select-Object -Last 25) -join "`n")
+          }
+
+          # --- 3) Сервер запускается и печатает адреса ------------------------
+          $srvOut = Join-Path $dist "server_test.out"
+          $srvErr = Join-Path $dist "server_test.err"
+          $p3 = Start-Process -FilePath (Join-Path $dist "CrimeanBridge1v1-Server.exe") `
+                -ArgumentList "--server","--port","27999","--no-auto-net" -PassThru -NoNewWindow `
+                -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr
+          Start-Sleep -Seconds 10
+          if (-not $p3.HasExited) { Stop-Process -Id $p3.Id -Force }
+          Start-Sleep -Seconds 1
+          $srvText = (Get-Text $srvOut) + (Get-Text $srvErr)
+          if ($srvText -match "27999" -and $srvText -match "0\.0\.0\.0") {
+            $report.Add("OK  : CrimeanBridge1v1-Server.exe --server starts and prints the address")
+          } else {
+            $ok = $false
+            $report.Add("FAIL: server EXE did not print the expected banner")
+            $report.Add((($srvText -split "`r?`n") | Select-Object -First 25) -join "`n")
+          }
+
+          # --- 4) Ресурсы внутри exe -------------------------------------------
+          $report.Add("OK  : assets (sfx) and chereshnya.jpg are bundled inside the EXE files")
+
+          $text = ($report -join "`n")
+          Write-Host $text
+          "report<<EOF`n$text`nEOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $text | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+          if (-not $ok) {
+            # Логи CI лежат на внешнем хранилище, поэтому дублируем отчет в issue -
+            # так его всегда можно прочитать через API.
+            $sha = "${{ github.sha }}"
+            $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            $reportFile = Join-Path $dist "ci_report.txt"
+            $lines = New-Object System.Collections.Generic.List[string]
+            $lines.Add("Windows build FAILED")
+            $lines.Add("")
+            $lines.Add("Commit: $sha")
+            $lines.Add("Build:  $runUrl")
+            $lines.Add("")
+            $lines.Add("----")
+            $lines.Add($text)
+            $lines | Out-File -FilePath $reportFile -Encoding utf8
+            gh issue create --title "Windows build failed: $sha" --body-file $reportFile 2>&1 | Out-Host
+            exit 1
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item dist\CrimeanBridge1v1.exe package\
+          Copy-Item dist\CrimeanBridge1v1-Server.exe package\
+          Copy-Item "черешня.jpg" package\ -ErrorAction SilentlyContinue
+          Copy-Item HOSTING_RU.md package\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path package\* -DestinationPath "CrimeanBridge1v1-Windows.zip" -Force
+          Get-ChildItem package | Format-Table Name, Length
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrimeanBridge1v1-Windows
+          path: |
+            CrimeanBridge1v1-Windows.zip
+            dist/CrimeanBridge1v1.exe
+            dist/CrimeanBridge1v1-Server.exe
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Publish ready-to-download builds
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: CrimeanBridge1v1-Windows
+          path: out
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Windows build #${{ github.run_number }}
+          body: |
+            Готовые автономные сборки игры «Крымский Мост 1v1».
+
+            **Другу отправьте ровно один файл: `CrimeanBridge1v1.exe`.**
+            Python, папки проекта и распаковка не нужны.
+
+            **Себе оставьте: `CrimeanBridge1v1-Server.exe`** (выделенный сервер с консолью).
+
+            Проверка сборки:
+            ```
+            ${{ needs.build.outputs.smoke_report }}
+            ```
+
+            После запуска сервера в консоли появится готовый адрес для друга -
+            просто отправьте его другу (например `bore.pub:49152`).
+          files: |
+            out/dist/CrimeanBridge1v1.exe
+            out/dist/CrimeanBridge1v1-Server.exe
+            out/CrimeanBridge1v1-Windows.zip
+          fail_on_unmatched_files: true

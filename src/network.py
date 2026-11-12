@@ -439,8 +439,71 @@ class GameClient:
         self._latest_snap: Optional[dict] = None
         self._running = False
         self._recv_thread: Optional[threading.Thread] = None
+        # Состояние неблокирующего подключения
+        self.connecting: bool = False
+        self._connect_thread: Optional[threading.Thread] = None
+        self._connect_result: Optional[bool] = None
+        self._connect_started: float = 0.0
+        self._cancel_connect: bool = False
+
+    def connect_async(
+        self,
+        host: str,
+        port: int,
+        preferred_role: str = "auto",
+        timeout: float = 8.0,
+    ) -> bool:
+        """
+        Запускает подключение В ФОНЕ, не блокируя интерфейс.
+
+        Раньше connect() дёргался напрямую из обработчика событий, и на
+        недоступном адресе окно игры висело 5 секунд без всякой реакции -
+        у друга это выглядело как «лагает на странице подключения».
+
+        Возвращает True, если подключение реально запущено.
+        """
+        if self.connecting:
+            return False
+        self.disconnect()
+        self.error_msg = ""
+        self._connect_result = None
+        self._cancel_connect = False
+        self.connecting = True
+        self._connect_started = time.perf_counter()
+
+        def _worker() -> None:
+            ok = self._connect_blocking(host, port, preferred_role, timeout)
+            self._connect_result = ok
+
+        self._connect_thread = threading.Thread(
+            target=_worker, daemon=True, name="GameClientConnect"
+        )
+        self._connect_thread.start()
+        return True
+
+    def poll_connect(self) -> Optional[bool]:
+        """
+        Возвращает результат подключения, когда оно завершилось.
+
+        None - подключение ещё идёт; True - успех; False - ошибка
+        (текст ошибки лежит в self.error_msg).
+        """
+        if not self.connecting:
+            return None
+        if self._connect_result is None:
+            return None
+        self.connecting = False
+        result = self._connect_result
+        self._connect_result = None
+        return result
 
     def connect(self, host: str, port: int, preferred_role: str = "auto", timeout: float = 5.0) -> bool:
+        """Синхронное подключение (используется в тестах и headless-сервере)."""
+        return self._connect_blocking(host, port, preferred_role, timeout)
+
+    def _connect_blocking(
+        self, host: str, port: int, preferred_role: str = "auto", timeout: float = 5.0
+    ) -> bool:
         self.disconnect()
         self.error_msg = ""
         try:
@@ -460,6 +523,11 @@ class GameClient:
                 self.error_msg = "Неверный протокол сервера."
                 s.close()
                 return False
+            if self._cancel_connect:
+                # Пользователь нажал ESC, пока шло подключение
+                s.close()
+                self.error_msg = "Подключение отменено."
+                return False
 
             s.settimeout(None)
             self.sock = s
@@ -469,6 +537,12 @@ class GameClient:
             self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True, name="GameClientRecv")
             self._recv_thread.start()
             return True
+        except socket.timeout:
+            self.error_msg = (
+                f"Нет ответа от {host}:{port} за {timeout:.0f} сек. "
+                "Проверьте IP-адрес и порт, а также что сервер уже запущен."
+            )
+            return False
         except OSError as exc:
             self.error_msg = f"Не удалось подключиться к {host}:{port} ({exc})"
             return False
@@ -482,6 +556,12 @@ class GameClient:
             except OSError:
                 pass
             self.sock = None
+
+    def cancel_connect(self) -> None:
+        """Отменяет не завершившееся фоновое подключение."""
+        self.connecting = False
+        self._connect_result = None
+        self._cancel_connect = True
 
     def send_drone_input(self, inp: DroneInput) -> None:
         if self.connected and self.sock is not None:

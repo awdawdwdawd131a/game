@@ -30,6 +30,7 @@ from .controls import (
     key_name,
 )
 from .network import GameClient, GameServer, get_all_local_ips, get_local_lan_ip
+from .net_setup import AutoHostSetup
 from .physics import WorldSimulation
 from .renderer import Camera3D, SceneRenderer3D
 from .selftest import CheckResult, run_verification_suite
@@ -88,6 +89,13 @@ class DesktopGameApp:
 
         self.hosted_server: Optional[GameServer] = None
         self.net_client: Optional[GameClient] = None
+        # Экран ожидания подключения (не блокирует GUI)
+        self.join_target: str = ""
+        self.join_elapsed: float = 0.0
+        # Автоматическая настройка публичного доступа (UPnP / бесплатный туннель)
+        self.auto_host: Optional[AutoHostSetup] = None
+        self.host_addresses: list = []
+        self.auto_host_status: str = ""
 
         # Local practice & verify bots
         self.my_role: str = "drone"
@@ -125,7 +133,14 @@ class DesktopGameApp:
 
     def _cleanup_network(self) -> None:
         self._set_mouse_capture(False)
+        if self.auto_host is not None:
+            try:
+                self.auto_host.stop()
+            except Exception:
+                pass
+            self.auto_host = None
         if self.net_client is not None:
+            self.net_client.cancel_connect()
             self.net_client.disconnect()
             self.net_client = None
         if self.hosted_server is not None:
@@ -177,6 +192,11 @@ class DesktopGameApp:
                 self._handle_menu_event(event)
             elif self.state in ("HOST_SETUP", "JOIN_SETUP"):
                 self._handle_net_setup_event(event)
+            elif self.state == "JOINING":
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                    self._cleanup_network()
+                    self.state = "JOIN_SETUP"
+                    self.status_banner = "Подключение отменено."
             elif self.state in ("GAME_LOCAL", "GAME_NET"):
                 self._handle_gameplay_event(event)
             elif self.state == "VERIFY_MODE":
@@ -230,6 +250,9 @@ class DesktopGameApp:
             self.state = "HOST_SETUP"
         elif action == "JOIN_SETUP":
             self.active_field = "ip"
+            # Поле очищаем: друг должен ввести адрес, который прислал хост.
+            self.ip_input = ""
+            self.port_input = str(DEFAULT_PORT)
             self.state = "JOIN_SETUP"
         elif action == "PRACTICE_DRONE":
             self._start_local_practice("drone")
@@ -275,16 +298,27 @@ class DesktopGameApp:
             return
 
         if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-            try:
-                port = int(self.port_input.strip() or str(DEFAULT_PORT))
-            except ValueError:
-                self.status_banner = "Некорректный порт! Введите число (например 27015)."
+            if self.state == "HOST_SETUP":
+                try:
+                    port = int(self.port_input.strip() or str(DEFAULT_PORT))
+                except ValueError:
+                    self.status_banner = "Некорректный порт! Введите число (например 27015)."
+                    return
+                self._launch_hosted_match(port)
                 return
 
-            if self.state == "HOST_SETUP":
-                self._launch_hosted_match(port)
+            # Адрес может содержать порт ("bore.pub:49152") - тогда отдельное
+            # поле "порт" игнорируется и даже может быть пустым.
+            host, addr_port = self._parse_address(self.ip_input.strip(), 0)
+            if addr_port:
+                port = addr_port
             else:
-                self._join_remote_match(self.ip_input.strip() or "127.0.0.1", port)
+                try:
+                    port = int(self.port_input.strip() or str(DEFAULT_PORT))
+                except ValueError:
+                    self.status_banner = "Некорректный порт! Введите число (например 27015)."
+                    return
+            self._join_remote_match(host, port)
             return
 
         # Text editing for IP / Port
@@ -302,6 +336,30 @@ class DesktopGameApp:
                 elif target == "port" and ch.isdigit() and len(self.port_input) < 5:
                     self.port_input += ch
 
+    @staticmethod
+    def _parse_address(text: str, default_port: int) -> Tuple[str, int]:
+        """
+        Разбирает адрес, введённый другом.
+
+        Поддерживаются варианты:
+            192.168.1.50          - адрес + порт из отдельного поля
+            192.168.1.50:27015    - адрес с портом
+            bore.pub:49152        - бесплатный туннель с портом
+
+        Если порт указан прямо в адресе, он важнее default_port.
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return "127.0.0.1", default_port
+        if raw.count(":") == 1:
+            host_part, _, port_part = raw.partition(":")
+            if port_part.isdigit() and host_part:
+                try:
+                    return host_part, int(port_part)
+                except ValueError:
+                    pass
+        return raw, default_port
+
     def _launch_hosted_match(self, port: int) -> None:
         self._cleanup_network()
         try:
@@ -317,19 +375,49 @@ class DesktopGameApp:
             self.my_role = cli.role
             self.sim = WorldSimulation()
             self.state = "GAME_NET"
+            self._start_auto_host_setup(bound)
         except OSError as exc:
             self.status_banner = f"Ошибка запуска сервера на порту {port}: {exc}"
 
+    def _start_auto_host_setup(self, port: int) -> None:
+        """
+        Автоматически готовит адрес, по которому друг подключится извне.
+
+        Порядок: проброс порта через UPnP (прямое подключение), затем -
+        бесплатный туннель bore.pub, если провайдер закрыл прямой доступ.
+        """
+        self.host_addresses = []
+        self.auto_host_status = "Настраиваем доступ извне..."
+        try:
+            self.auto_host = AutoHostSetup(port=port, on_update=self._on_auto_host_update)
+            self.auto_host.start()
+        except Exception as exc:  # noqa: BLE001 - настройка не должна ломать игру
+            self.auto_host = None
+            self.auto_host_status = f"Автонастройка не удалась: {exc}"
+
+    def _on_auto_host_update(self, snapshot: dict) -> None:
+        """Вызывается из фонового потока - только присваивает значения."""
+        self.auto_host_status = str(snapshot.get("status", ""))
+        self.host_addresses = list(snapshot.get("addresses", []))
+
     def _join_remote_match(self, host: str, port: int) -> None:
+        """
+        Подключается к удалённому серверу В ФОНЕ.
+
+        Раньше здесь был blocking connect() на 5 секунд: окно игры висело
+        без всякой реакции, и у друга это выглядело как «лагает на странице
+        подключения». Теперь показывается экран ожидания с анимацией,
+        прогресс-подсказками и возможностью отмены по ESC.
+        """
         self._cleanup_network()
         cli = GameClient()
-        if not cli.connect(host, port, preferred_role=self.preferred_role, timeout=5.0):
-            self.status_banner = cli.error_msg
+        if not cli.connect_async(host, port, preferred_role=self.preferred_role, timeout=10.0):
+            self.status_banner = "Подключение уже выполняется, подождите."
             return
         self.net_client = cli
-        self.my_role = cli.role
-        self.sim = WorldSimulation()
-        self.state = "GAME_NET"
+        self.join_target = f"{host}:{port}"
+        self.join_elapsed = 0.0
+        self.state = "JOINING"
 
     def _handle_gameplay_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.KEYDOWN:
@@ -495,6 +583,31 @@ class DesktopGameApp:
             self._trigger_audio_cues()
             self._update_ambient_audio()
 
+        elif self.state == "JOINING":
+            self.join_elapsed += dt
+            cli = self.net_client
+            if cli is None:
+                self.state = "JOIN_SETUP"
+                return
+            res = cli.poll_connect()
+            if res is None:
+                # Подсказка, если подключение идёт слишком долго
+                if self.join_elapsed > 12.0:
+                    self.status_banner = (
+                        "Подключение не получается. Проверьте: у хоста запущен сервер? "
+                        "IP-адрес и порт верные? Есть ли сетевой доступ?"
+                    )
+                return
+            if res:
+                self.my_role = cli.role
+                self.sim = WorldSimulation()
+                self.state = "GAME_NET"
+                self.status_banner = ""
+            else:
+                self.status_banner = cli.error_msg
+                self.state = "JOIN_SETUP"
+                self._cleanup_network()
+
         elif self.state == "VERIFY_MODE" and self.verify_split_active:
             d_in = self.bot_drone.compute_input(self.sim, dt)
             t_in = self.bot_truck.compute_input(self.sim, dt)
@@ -595,6 +708,8 @@ class DesktopGameApp:
             self._render_joystick_screen()
         elif self.state == "KEYBIND_TEST":
             self._render_keybind_screen()
+        elif self.state == "JOINING":
+            self._render_joining_screen()
 
     def _render_background_flyby(self) -> None:
         # Orbit camera smoothly around the iconic white Crimean Bridge arches
@@ -696,12 +811,24 @@ class DesktopGameApp:
         else:
             ip_sel = self.active_field == "ip"
             lbl = self.renderer.font_md.render(
-                f"IP-адрес Хоста:  [{self.ip_input}{'_' if ip_sel else ''}]",
+                f"Адрес Хоста:  [{self.ip_input}{'_' if ip_sel else ''}]",
                 True,
                 (255, 230, 110) if ip_sel else (215, 225, 238),
             )
             self.screen.blit(lbl, (px + 36, y))
-            y += 46
+            y += 40
+            hint = self.renderer.font_xs.render(
+                "Впишите адрес, который прислал хост. Можно целиком с портом:",
+                True, (150, 180, 205),
+            )
+            self.screen.blit(hint, (px + 36, y))
+            y += 18
+            for example in ("192.168.1.50:27015    (одна Wi-Fi сеть)",
+                            "bore.pub:49152            (через интернет)"):
+                row = self.renderer.font_xs.render(f"     например:  {example}", True, (135, 165, 195))
+                self.screen.blit(row, (px + 36, y))
+                y += 18
+            y += 10
 
         port_sel = is_host or self.active_field == "port"
         plbl = self.renderer.font_md.render(
@@ -762,6 +889,39 @@ class DesktopGameApp:
             )
             self.screen.blit(hint, (self.screen.get_width() // 2 - hint.get_width() // 2, 76))
 
+        # Панель адреса рисуется последней, чтобы её не перекрывал оверлей
+        # выбора модификаторов - хозяин должен видеть адрес всегда.
+        if self.state == "GAME_NET" and self.hosted_server is not None:
+            self._render_host_address_panel()
+
+    def _render_host_address_panel(self) -> None:
+        """Панель «что вписать другу» - видна хозяину во время сетевого матча."""
+        w, h = self.screen.get_size()
+        panel_w = 236
+        rows = max(1, len(self.host_addresses))
+        panel_h = 26 + 17 * rows
+        px, py = 14, h - panel_h - 12
+        panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+        panel.fill((8, 14, 22, 240))
+        self.screen.blit(panel, (px, py))
+        pygame.draw.rect(self.screen, (70, 150, 110), (px, py, panel_w, panel_h), 2)
+
+        ttl = self.renderer.font_xs.render("ДРУГ ПОДКЛЮЧАЕТСЯ ПО АДРЕСУ:", True, (125, 235, 165))
+        self.screen.blit(ttl, (px + 8, py + 6))
+
+        y = py + 24
+        if not self.host_addresses:
+            txt = self.renderer.font_xs.render(
+                (self.auto_host_status or "Настраиваем доступ извне...")[:32],
+                True, (215, 200, 140),
+            )
+            self.screen.blit(txt, (px + 8, y))
+        else:
+            for _label, address in self.host_addresses[:3]:
+                row = self.renderer.font_xs.render(f"{address}", True, (255, 235, 140))
+                self.screen.blit(row, (px + 8, y))
+                y += 17
+
     def _render_verify_mode(self) -> None:
         w, h = self.screen.get_size()
         self.screen.fill((12, 16, 24))
@@ -818,6 +978,56 @@ class DesktopGameApp:
             )
             self.screen.blit(line, (22, row_y), (0, 0, min(line.get_width(), max_line_w), line.get_height()))
             row_y += row_h
+
+    def _render_joining_screen(self) -> None:
+        """Экран ожидания подключения: анимация, статус, подсказки, отмена по ESC."""
+        self._render_background_flyby()
+        w, h = self.screen.get_size()
+        cx = w // 2
+        cy = h // 2
+
+        panel = pygame.Surface((720, 320), pygame.SRCALPHA)
+        panel.fill((12, 18, 30, 232))
+        pygame.draw.rect(self.screen, (68, 132, 190), (cx - 360, cy - 160, 720, 320), 2)
+        self.screen.blit(panel, (cx - 360, cy - 160))
+
+        title = self.renderer.font_lg.render("ПОДКЛЮЧЕНИЕ...", True, (255, 218, 90))
+        self.screen.blit(title, (cx - title.get_width() // 2, cy - 130))
+
+        target = self.renderer.font_md.render(
+            f"Сервер: {self.join_target}", True, (205, 225, 245)
+        )
+        self.screen.blit(target, (cx - target.get_width() // 2, cy - 80))
+
+        # Вращающийся индикатор + секунды
+        dots = "." * (1 + int(self.join_elapsed * 2) % 3)
+        secs = self.renderer.font_md.render(
+            f"Прошло {self.join_elapsed:.0f} сек{dots}", True, (150, 200, 235)
+        )
+        self.screen.blit(secs, (cx - secs.get_width() // 2, cy - 40))
+
+        # Анимированное кольцо загрузки
+        radius = 46
+        ring_cx, ring_cy = cx, cy + 40
+        pygame.draw.circle(self.screen, (45, 70, 100), (ring_cx, ring_cy), radius, 6)
+        steps = 14
+        spin = int(self.join_elapsed * 4) % steps
+        for i in range(spin + 1):
+            a = (i / steps) * math.tau - math.pi / 2
+            x1 = ring_cx + math.cos(a) * (radius - 3)
+            y1 = ring_cy + math.sin(a) * (radius - 3)
+            x2 = ring_cx + math.cos(a) * (radius + 3)
+            y2 = ring_cy + math.sin(a) * (radius + 3)
+            pygame.draw.line(self.screen, (255, 200, 70), (x1, y1), (x2, y2), 6)
+
+        hint = self.renderer.font_sm.render(
+            "Проверяем доступность сервера. Окно не зависнет - можно ждать спокойно.",
+            True, (170, 195, 220),
+        )
+        self.screen.blit(hint, (cx - hint.get_width() // 2, cy + 100))
+
+        esc = self.renderer.font_sm.render("ESC - отменить подключение", True, (200, 170, 170))
+        self.screen.blit(esc, (cx - esc.get_width() // 2, cy + 132))
 
     def _render_keybind_screen(self) -> None:
         """Экран назначения клавиш и калибровки управления."""
