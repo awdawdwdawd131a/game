@@ -109,6 +109,16 @@ class WeatherPreset:
     rain_intensity: float                  # 0..1 rain streaks
     lightning_chance: float                # Per-second flash chance
     drone_battery_drain_mult: float        # Cold/wind drain factor
+    # --- Небо и окружение (рендер) -------------------------------------------
+    star_density: float = 0.0              # 0..1 - плотность звёзд (только ночью)
+    cloud_amount: float = 0.0              # 0..1 - количество облаков
+    cloud_color: Tuple[int, int, int] = (200, 205, 215)
+    sun_glow: float = 0.0                  # 0..1 - видимость диска светила
+    sun_color: Tuple[int, int, int] = (255, 238, 190)
+    sun_azimuth: float = 0.0               # азимут светила в мире (рад, 0 = +Z)
+    sun_elevation: float = 0.55            # высота светила над горизонтом (рад)
+    city_lights: float = 0.0               # 0..1 - огни города на том берегу
+    sea_wave: float = 0.35                 # 0..1 - амплитуда бликов на воде
 
 
 WEATHER_PRESETS: List[WeatherPreset] = [
@@ -129,6 +139,15 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         rain_intensity=0.0,
         lightning_chance=0.0,
         drone_battery_drain_mult=1.0,
+        star_density=0.0,
+        cloud_amount=0.45,
+        cloud_color=(252, 252, 254),
+        sun_glow=0.8,
+        sun_color=(255, 250, 226),
+        sun_azimuth=3.45,
+        sun_elevation=0.55,
+        city_lights=0.0,
+        sea_wave=0.55,
     ),
     WeatherPreset(
         id="kerch_fog",
@@ -147,6 +166,15 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         rain_intensity=0.1,
         lightning_chance=0.0,
         drone_battery_drain_mult=1.05,
+        star_density=0.0,
+        cloud_amount=0.6,
+        cloud_color=(206, 210, 214),
+        sun_glow=0.18,
+        sun_color=(226, 230, 234),
+        sun_azimuth=3.15,
+        sun_elevation=0.4,
+        city_lights=0.3,
+        sea_wave=0.12,
     ),
     WeatherPreset(
         id="black_sea_storm",
@@ -165,6 +193,15 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         rain_intensity=1.0,
         lightning_chance=0.22,
         drone_battery_drain_mult=1.18,
+        star_density=0.0,
+        cloud_amount=0.92,
+        cloud_color=(58, 64, 74),
+        sun_glow=0.05,
+        sun_color=(120, 126, 136),
+        sun_azimuth=2.9,
+        sun_elevation=0.28,
+        city_lights=0.4,
+        sea_wave=0.85,
     ),
     WeatherPreset(
         id="crimson_sunset",
@@ -183,6 +220,15 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         rain_intensity=0.0,
         lightning_chance=0.0,
         drone_battery_drain_mult=1.10,
+        star_density=0.15,
+        cloud_amount=0.72,
+        cloud_color=(226, 138, 108),
+        sun_glow=1.0,
+        sun_color=(255, 196, 104),
+        sun_azimuth=3.6,
+        sun_elevation=0.14,
+        city_lights=0.25,
+        sea_wave=0.7,
     ),
     WeatherPreset(
         id="night_spotlight",
@@ -201,6 +247,15 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         rain_intensity=0.0,
         lightning_chance=0.0,
         drone_battery_drain_mult=1.12,
+        star_density=0.95,
+        cloud_amount=0.3,
+        cloud_color=(30, 36, 52),
+        sun_glow=0.9,
+        sun_color=(226, 232, 246),
+        sun_azimuth=3.3,
+        sun_elevation=0.62,
+        city_lights=0.85,
+        sea_wave=0.3,
     ),
     WeatherPreset(
         id="winter_gale",
@@ -219,6 +274,15 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         rain_intensity=0.65,
         lightning_chance=0.0,
         drone_battery_drain_mult=1.35,
+        star_density=0.0,
+        cloud_amount=0.85,
+        cloud_color=(216, 222, 230),
+        sun_glow=0.22,
+        sun_color=(228, 234, 242),
+        sun_azimuth=3.0,
+        sun_elevation=0.45,
+        city_lights=0.35,
+        sea_wave=0.6,
     ),
 ]
 
