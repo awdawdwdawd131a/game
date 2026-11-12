@@ -23,7 +23,7 @@ import numpy as np
 import pygame
 
 from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS, WEATHER_PRESETS
-from .controls import InputController, apply_deadzone
+from .controls import InputController, JoystickProfile, apply_deadzone
 from .math3d import forward_from_angles
 from .network import GameClient, GameServer
 from .physics import DroneInput, TruckInput, WorldSimulation
@@ -299,5 +299,65 @@ def run_verification_suite(
         )
 
     record("9. Механика подрыва БЧ и захват цели зенитной турелью", check_airburst_and_lock)
+
+    # 10. Near-plane clipping topology + rebindable control profile
+    def check_clipping_and_controls() -> str:
+        if not pygame.get_init():
+            pygame.init()
+        near = 1.0
+
+        def _clip(tris):
+            v = np.array(tris, dtype=np.float32)
+            n = len(tris)
+            cols = np.tile(np.array([[200, 180, 160]], dtype=np.float32), (n, 1))
+            norms = np.tile(np.array([[0.0, 0.0, 1.0]], dtype=np.float32), (n, 1))
+            ts = np.zeros(n, dtype=bool)
+            return SceneRenderer3D._clip_near_plane(
+                v[:, 0], v[:, 1], v[:, 2], cols, norms, ts, near
+            )
+
+        # 1 vertex behind the camera -> visible quad split into 2 triangles
+        out = _clip([[[0, 0, 0.0], [4, 0, 3.0], [0, 4, 4.0]]])
+        assert len(out[0]) == 2, "Грань с 1 вершиной за камерой должна давать 2 треугольника!"
+        zs = np.concatenate([out[0][:, 2], out[1][:, 2], out[2][:, 2]])
+        assert zs.min() >= near - 1e-6, "После клиппинга не должно остаться вершин за камерой!"
+        w = np.cross(out[1] - out[0], out[2] - out[0])[:, 2]
+        assert np.all(w > 0), "Клиппинг должен сохранять ориентацию грани (CCW)!"
+
+        # 2 vertices behind the camera -> single triangle
+        out = _clip([[[0, 0, 3.0], [4, 0, 0.0], [0, 4, 0.5]]])
+        assert len(out[0]) == 1, "Грань с 2 вершинами за камерой должна давать 1 треугольник!"
+        zs = np.concatenate([out[0][:, 2], out[1][:, 2], out[2][:, 2]])
+        assert zs.min() >= near - 1e-6, "После клиппинга не должно остаться вершин за камерой!"
+
+        # Rebinding profile: default -> rebind -> reset -> JSON round-trip
+        profile = JoystickProfile()
+        ic = InputController(profile)
+        default_key = ic.key_for("drone_forward")
+        ic.rebind("drone_forward", pygame.K_i)
+        assert ic.key_for("drone_forward") == pygame.K_i, "Клавиша не переназначилась!"
+        ic.reset_binds()
+        assert ic.key_for("drone_forward") == default_key, "Сброс раскладки не сработал!"
+        ic.rebind("drone_forward", pygame.K_i)
+        profile.mouse_sensitivity = 0.0033
+        profile.deadzone = 0.2
+        profile.axis_calibration[2] = 0.03
+        tmp_json = os.path.join(repo_root, "logs", "_selftest_profile.json")
+        os.makedirs(os.path.dirname(tmp_json), exist_ok=True)
+        profile.save_to(tmp_json)
+        loaded = JoystickProfile.load_from(tmp_json)
+        assert loaded.key_binds.get("drone_forward") == pygame.K_i, "Профиль не сохранился в JSON!"
+        assert abs(loaded.mouse_sensitivity - 0.0033) < 1e-6, "Чувствительность мыши не сохранилась!"
+        assert abs(loaded.deadzone - 0.2) < 1e-6, "Мёртвая зона не сохранилась!"
+        assert abs(loaded.axis_calibration.get(2, -1.0) - 0.03) < 1e-6, "Калибровка оси не сохранилась!"
+        os.remove(tmp_json)
+
+        return (
+            "Клиппинг ближней плоскости корректен (1 и 2 вершины за камерой, "
+            "ориентация грани сохранена), профиль управления переназначается, "
+            "сбрасывается и сохраняется в JSON"
+        )
+
+    record("10. Клиппинг ближней плоскости и профиль управления", check_clipping_and_controls)
 
     return results

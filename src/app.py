@@ -22,7 +22,13 @@ import pygame
 from .audio import SoundManager
 from .bot_ai import BotDroneController, BotTruckController
 from .config import DEFAULT_PORT, DRONE_MODIFIERS, DT, TRUCK_MODIFIERS, WEATHER_PRESETS
-from .controls import InputController
+from .controls import (
+    KEYBIND_LABELS_RU,
+    REBINDABLE_ACTIONS,
+    InputController,
+    JoystickProfile,
+    key_name,
+)
 from .network import GameClient, GameServer, get_local_lan_ip
 from .physics import WorldSimulation
 from .renderer import Camera3D, SceneRenderer3D
@@ -42,7 +48,16 @@ class DesktopGameApp:
 
         self.sim = WorldSimulation(seed=42)
         self.renderer = SceneRenderer3D(width, height, self.sim.barriers, repo_root)
-        self.controls = InputController()
+        # Профиль управления (клавиши, чувствительность, мёртвая зона)
+        # загружается из файла рядом с игрой и сохраняется при выходе.
+        self.profile_path = os.path.join(repo_root, "logs", "input_profile.json")
+        try:
+            profile = JoystickProfile.load_from(self.profile_path)
+        except Exception:
+            profile = JoystickProfile()
+        self.controls = InputController(profile)
+        # Масштаб внутреннего разрешения мира из профиля (1.0 = натуральное)
+        self.renderer.set_render_scale(profile.render_scale)
         self.audio = SoundManager(enabled=True)
 
         # App screens: "MENU", "HOST_SETUP", "JOIN_SETUP", "GAME_LOCAL", "GAME_NET", "VERIFY_MODE", "JOYSTICK_TEST"
@@ -55,6 +70,7 @@ class DesktopGameApp:
             ("Тренировка за Водителя Бензовоза (сбивать ИИ FPV)", "PRACTICE_TRUCK"),
             ("Проверочный режим (Автотесты + 3D Демо Сплит-Скрин)", "VERIFY_MODE"),
             ("Настройка Джойстика / Геймпада / FPV-аппаратуры", "JOYSTICK_TEST"),
+            ("Назначение клавиш и калибровка (сохраняется в файл)", "KEYBIND_TEST"),
             ("Выход на рабочий стол", "EXIT"),
         ]
 
@@ -80,6 +96,12 @@ class DesktopGameApp:
         self.verify_results: List[CheckResult] = []
         self.verify_split_active: bool = False
         self._menu_flyby_t: float = 0.0
+        # Экран назначения клавиш
+        self.keybind_idx: int = 0
+        self.keybind_list_idx: int = 0
+        self.keybind_waiting: bool = False
+        self.keybind_message: str = ""
+        self.keybind_scroll: int = 0
 
         # Previous FX counts to trigger gunshot/explosion audio cues
         self._prev_explosions = 0
@@ -106,6 +128,12 @@ class DesktopGameApp:
         if self.hosted_server is not None:
             self.hosted_server.stop()
             self.hosted_server = None
+        # Фоновые звуковые петли (ветер/ротор/мотор/дождь/РЭБ) должны
+        # заглохнуть, как только игрок вышел из боя.
+        try:
+            self.audio.stop_all_loops()
+        except Exception:
+            pass
 
     # -----------------------------------------------------------------------
     # Main Loop
@@ -120,6 +148,11 @@ class DesktopGameApp:
                 pygame.display.flip()
         finally:
             self._cleanup_network()
+            # Сохраняем профиль управления (клавиши, чувствительность, зона)
+            try:
+                self._save_input_profile()
+            except Exception:
+                pass
             pygame.quit()
 
     # -----------------------------------------------------------------------
@@ -147,6 +180,8 @@ class DesktopGameApp:
                 self._handle_verify_event(event)
             elif self.state == "JOYSTICK_TEST":
                 self._handle_joystick_event(event)
+            elif self.state == "KEYBIND_TEST":
+                self._handle_keybind_event(event)
 
     def _handle_menu_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.KEYDOWN:
@@ -201,6 +236,12 @@ class DesktopGameApp:
         elif action == "JOYSTICK_TEST":
             self.controls.refresh_joysticks()
             self.state = "JOYSTICK_TEST"
+        elif action == "KEYBIND_TEST":
+            self.keybind_idx = 0
+            self.keybind_list_idx = 0
+            self.keybind_waiting = False
+            self.keybind_message = ""
+            self.state = "KEYBIND_TEST"
 
     def _start_local_practice(self, role: str) -> None:
         self._cleanup_network()
@@ -325,7 +366,49 @@ class DesktopGameApp:
             elif event.key == pygame.K_SPACE:
                 self.verify_split_active = not self.verify_split_active
 
-    def _handle_joystick_event(self, event: pygame.event.Event) -> None:
+    def _handle_keybind_event(self, event: pygame.event.Event) -> None:
+        """Экран назначения клавиш: выбор действия -> нажатие новой клавиши."""
+        if event.type != pygame.KEYDOWN:
+            return
+        if self.keybind_waiting:
+            # Ждём нажатия клавиши для назначения
+            if event.key == pygame.K_ESCAPE:
+                self.keybind_waiting = False
+                self.keybind_message = "Назначение отменено"
+                return
+            action = REBINDABLE_ACTIONS[self.keybind_idx]
+            self.controls.rebind(action, event.key)
+            self.keybind_waiting = False
+            self.keybind_message = (
+                f"{KEYBIND_LABELS_RU.get(action, action)} -> {key_name(event.key)}"
+            )
+            return
+
+        if event.key == pygame.K_ESCAPE:
+            self.state = "MENU"
+        elif event.key in (pygame.K_DOWN, pygame.K_s):
+            self.keybind_idx = (self.keybind_idx + 1) % len(REBINDABLE_ACTIONS)
+        elif event.key in (pygame.K_UP, pygame.K_w):
+            self.keybind_idx = (self.keybind_idx - 1) % len(REBINDABLE_ACTIONS)
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            self.keybind_waiting = True
+            self.keybind_message = "Нажмите новую клавишу (ESC - отмена)"
+        elif event.key == pygame.K_BACKSPACE:
+            self.controls.reset_binds()
+            self.keybind_message = "Восстановлена стандартная раскладка"
+        elif event.key == pygame.K_F2:
+            self._save_input_profile()
+            self.keybind_message = "Профиль сохранён"
+
+    def _save_input_profile(self) -> bool:
+        """Сохраняет профиль управления (клавиши, чувствительность) в JSON."""
+        try:
+            ok = self.controls.profile.save_to(self.profile_path)
+        except Exception:
+            ok = False
+        return ok
+
+    def _handle_joystick_event(self, event: pygame.Event) -> None:
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 self.state = "MENU"
@@ -335,6 +418,27 @@ class DesktopGameApp:
                 self.controls.profile.deadzone = max(0.02, round(self.controls.profile.deadzone - 0.02, 2))
             elif event.key == pygame.K_RIGHTBRACKET:
                 self.controls.profile.deadzone = min(0.40, round(self.controls.profile.deadzone + 0.02, 2))
+            elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                self._change_render_scale(-0.1)
+            elif event.key in (pygame.K_EQUALS, pygame.K_KP_EQUALS):
+                self._change_render_scale(+0.1)
+            elif event.key == pygame.K_c:
+                # Калибровка центра стиков: отпустите все стики и нажмите C
+                n = self.controls.calibrate_active_axes()
+                if n > 0:
+                    self.status_banner = f"Центр стиков откалиброван по {n} осям (стики должны быть отпущены!)"
+                else:
+                    self.status_banner = "Нет подключённых устройств - калибровать нечего"
+
+    def _change_render_scale(self, delta: float) -> None:
+        """Меняет целевой масштаб внутреннего разрешения мира (0.5..1.0)."""
+        prof = self.controls.profile
+        prof.render_scale = round(max(0.5, min(1.0, prof.render_scale + delta)), 2)
+        self.renderer.set_render_scale(prof.render_scale)
+        self.status_banner = (
+            f"Масштаб рендера: {int(prof.render_scale * 100)}% "
+            f"(FPS-стабилизация сама подстроит точное значение)"
+        )
 
     # -----------------------------------------------------------------------
     # Frame Update
@@ -360,6 +464,7 @@ class DesktopGameApp:
 
             self.sim.step(dt, d_in, t_in)
             self._trigger_audio_cues()
+            self._update_ambient_audio()
 
         elif self.state == "GAME_NET":
             if self.net_client is None or not self.net_client.connected:
@@ -384,6 +489,7 @@ class DesktopGameApp:
                 self.net_client.send_truck_input(t_in)
 
             self._trigger_audio_cues()
+            self._update_ambient_audio()
 
         elif self.state == "VERIFY_MODE" and self.verify_split_active:
             d_in = self.bot_drone.compute_input(self.sim, dt)
@@ -401,6 +507,74 @@ class DesktopGameApp:
         self._prev_explosions = len(self.sim.explosions)
         self._prev_tracers = len(self.sim.tracers)
 
+    def _update_ambient_audio(self) -> None:
+        """
+        Управляет фоновыми звуковыми циклами (мотоцикл/ветер/дождь/РЭБ).
+
+        Громкость зависит от погоды, состояния дрона и расстояния до
+        бензовоза: слышно ветер, шорох дождя и треск помех от РЭБ-купола.
+        """
+        w = self.sim.weather
+        active = self.sim.phase == "ACTIVE_ROUND"
+
+        # --- Ветер: сильнее в шторм и на высоких горах ----------------------------
+        wind_v = 0.10 + 0.055 * float(w.gust_strength)
+        if active and self.my_role == "drone":
+            speed = float(np.linalg.norm(self.sim.drone_vel))
+            wind_v += min(0.28, speed * 0.012)
+        if active:
+            self.audio.start_loop("wind", wind_v)
+        else:
+            self.audio.stop_loop("wind")
+
+        # --- Роторы дрона ------------------------------------------------------
+        rotor_v = 0.0
+        if active and self.my_role == "drone" and self.sim.drone_alive:
+            rotor_v = 0.20 + (0.10 if self.sim.drone_vel.size else 0.0)
+            rotor_v = 0.26
+        elif active and self.my_role == "truck":
+            # У водителя слышен звук чужого дрона - тем громче, чем ближе
+            dist = float(np.linalg.norm(self.sim.drone_pos - self.sim.truck_pos))
+            rotor_v = max(0.0, 0.30 - dist / 260.0)
+        if rotor_v > 0.01:
+            self.audio.start_loop("rotor", rotor_v)
+        else:
+            self.audio.stop_loop("rotor")
+
+        # --- Мотор бензовоза ----------------------------------------------------
+        engine_v = 0.0
+        if active and self.my_role == "truck":
+            engine_v = 0.24
+        elif active and self.my_role == "drone":
+            dist = float(np.linalg.norm(self.sim.drone_pos - self.sim.truck_pos))
+            engine_v = max(0.0, 0.26 - dist / 300.0)
+        if engine_v > 0.01:
+            self.audio.start_loop("engine", engine_v)
+        else:
+            self.audio.stop_loop("engine")
+
+        # --- Дождь / снег -------------------------------------------------------
+        rain_v = 0.0
+        if active and float(w.rain_intensity) > 0.05:
+            rain_v = 0.06 + 0.16 * float(w.rain_intensity)
+        if rain_v > 0.01:
+            self.audio.start_loop("rain", rain_v)
+        else:
+            self.audio.stop_loop("rain")
+
+        # --- Помехи от РЭБ-купола ----------------------------------------------
+        ew_v = 0.0
+        if active and self.sim.ew_active_timer > 0.0:
+            if self.my_role == "drone":
+                dist = float(np.linalg.norm(self.sim.drone_pos - self.sim.truck_pos))
+                ew_v = max(0.0, 0.22 - dist / 320.0)
+            else:
+                ew_v = 0.05
+        if ew_v > 0.01:
+            self.audio.start_loop("ew_static", ew_v)
+        else:
+            self.audio.stop_loop("ew_static")
+
     # -----------------------------------------------------------------------
     # Rendering Screens
     # -----------------------------------------------------------------------
@@ -415,6 +589,8 @@ class DesktopGameApp:
             self._render_verify_mode()
         elif self.state == "JOYSTICK_TEST":
             self._render_joystick_screen()
+        elif self.state == "KEYBIND_TEST":
+            self._render_keybind_screen()
 
     def _render_background_flyby(self) -> None:
         # Orbit camera smoothly around the iconic white Crimean Bridge arches
@@ -627,6 +803,79 @@ class DesktopGameApp:
             self.screen.blit(line, (22, row_y), (0, 0, min(line.get_width(), max_line_w), line.get_height()))
             row_y += row_h
 
+    def _render_keybind_screen(self) -> None:
+        """Экран назначения клавиш и калибровки управления."""
+        w, h = self.screen.get_size()
+        self.screen.fill((14, 20, 32))
+        cx = w // 2
+
+        title = self.renderer.font_lg.render("НАЗНАЧЕНИЕ КЛАВИШ И КАЛИБРОВКА", True, (255, 218, 90))
+        self.screen.blit(title, (cx - title.get_width() // 2, 26))
+
+        prof = self.controls.profile
+        sub = self.renderer.font_sm.render(
+            f"Мышь: {prof.mouse_sensitivity:.4f}   |   Геймпад/пульт: {prof.look_sensitivity:.2f}   |   "
+            f"Мёртвая зона: {prof.deadzone:.2f}   |   Режим FPV Mode 2: "
+            f"{'вкл' if prof.fpv_radio_mode2 else 'выкл'}",
+            True,
+            (130, 215, 255),
+        )
+        self.screen.blit(sub, (cx - sub.get_width() // 2, 68))
+
+        # --- Список действий ---
+        rows_h = 26
+        box_h = min(h - 220, rows_h * len(REBINDABLE_ACTIONS) + 16)
+        box_y = 100
+        box = pygame.Surface((min(760, w - 80), box_h), pygame.SRCALPHA)
+        box.fill((22, 32, 48, 232))
+        self.screen.blit(box, (cx - box.get_width() // 2, box_y))
+        pygame.draw.rect(self.screen, (86, 140, 200), (cx - box.get_width() // 2, box_y, box.get_width(), box_h), 2)
+
+        visible = max(1, (box_h - 12) // rows_h)
+        if self.keybind_idx < self.keybind_scroll:
+            self.keybind_scroll = self.keybind_idx
+        elif self.keybind_idx >= self.keybind_scroll + visible:
+            self.keybind_scroll = self.keybind_idx - visible + 1
+        self.keybind_scroll = max(0, min(self.keybind_scroll, len(REBINDABLE_ACTIONS) - visible))
+
+        for i in range(visible):
+            ai = self.keybind_scroll + i
+            if ai >= len(REBINDABLE_ACTIONS):
+                break
+            action = REBINDABLE_ACTIONS[ai]
+            sel = ai == self.keybind_idx
+            ry = box_y + 8 + i * rows_h
+            if sel:
+                hl = pygame.Surface((box.get_width() - 12, rows_h - 2), pygame.SRCALPHA)
+                hl.fill((52, 104, 168, 235))
+                self.screen.blit(hl, (cx - box.get_width() // 2 + 6, ry))
+            label = KEYBIND_LABELS_RU.get(action, action)
+            lbl = self.renderer.font_xs.render(label, True, (255, 255, 255) if sel else (198, 212, 230))
+            self.screen.blit(lbl, (cx - box.get_width() // 2 + 16, ry + 4))
+            key_txt = key_name(self.controls.key_for(action))
+            kcol = (255, 205, 90) if sel else (150, 200, 235)
+            kw = self.renderer.font_xs.render(key_txt, True, kcol)
+            self.screen.blit(kw, (cx + box.get_width() // 2 - kw.get_width() - 20, ry + 4))
+
+        # --- Подсказки ---
+        info = self.keybind_message or (
+            "[W/S] или [UP/DOWN] - выбрать действие   |   [ENTER] - назначить новую клавишу   |   "
+            "[BACKSPACE] - сбросить всё   |   [F2] - сохранить профиль   |   [ESC] - назад"
+        )
+        info_s = self.renderer.font_xs.render(info, True, (255, 225, 130) if self.keybind_waiting else (195, 210, 228))
+        self.screen.blit(info_s, (cx - info_s.get_width() // 2, h - 96))
+
+        save_txt = "Профиль: " + self.profile_path
+        st = self.renderer.font_xs.render(save_txt, True, (150, 170, 195))
+        self.screen.blit(st, (cx - st.get_width() // 2, h - 68))
+
+        hint = self.renderer.font_xs.render(
+            "Мышь всегда отвечает за курс/тангаж; геймпад и FPV-пульт (Mode 2) работают параллельно с клавишами.",
+            True,
+            (170, 190, 215),
+        )
+        self.screen.blit(hint, (cx - hint.get_width() // 2, h - 44))
+
     def _render_joystick_screen(self) -> None:
         w, h = self.screen.get_size()
         self.screen.fill((14, 20, 32))
@@ -643,14 +892,24 @@ class DesktopGameApp:
         )
         self.screen.blit(sub, (cx - sub.get_width() // 2, 74))
 
+        scale_pct = int(round(self.controls.profile.render_scale * 100))
+        scale_txt = self.renderer.font_sm.render(
+            f"Качество 3D-картинки [- / =]: {scale_pct}%  "
+            f"(меньше - быстрее на слабых ПК, прицел и HUD всегда чёткие)",
+            True,
+            (255, 205, 120),
+        )
+        self.screen.blit(scale_txt, (cx - scale_txt.get_width() // 2, 100))
+
         snaps = self.controls.get_joystick_Snapshot()
         if not snaps:
-            empty = self.renderer.font_md.render(
-                "Подключенные контроллеры сейчас не обнаружены (подключите USB/Bluetooth геймпад или пульт — подхватится на лету!)",
-                True,
-                (255, 185, 95),
-            )
-            self.screen.blit(empty, (cx - empty.get_width() // 2, 160))
+            empty_lines = [
+                "Подключенные контроллеры сейчас не обнаружены.",
+                "Подключите USB/Bluetooth геймпад или пульт — подхватится на лету!",
+            ]
+            for li, line in enumerate(empty_lines):
+                et = self.renderer.font_md.render(line, True, (255, 185, 95))
+                self.screen.blit(et, (cx - et.get_width() // 2, 160 + li * 30))
         else:
             y = 126
             for js in snaps:
@@ -670,7 +929,13 @@ class DesktopGameApp:
                 for ai, aval in enumerate(js.axes[:8]):
                     bx = 58 + (ai % 4) * 285
                     by = y + 52 + (ai // 4) * 42
-                    lbl = self.renderer.font_xs.render(f"Ось {ai}: {aval:+.2f}", True, (220, 230, 242))
+                    center = self.controls.profile.axis_calibration.get(ai)
+                    if center is None:
+                        lbl = self.renderer.font_xs.render(f"Ось {ai}: {aval:+.2f}", True, (220, 230, 242))
+                    else:
+                        lbl = self.renderer.font_xs.render(
+                            f"Ось {ai}: {aval:+.2f} (центр {center:+.2f})", True, (220, 230, 242)
+                        )
                     self.screen.blit(lbl, (bx, by))
                     pygame.draw.rect(self.screen, (50, 62, 82), (bx + 92, by + 2, 160, 14))
                     fill_x = bx + 92 + 80
@@ -689,7 +954,8 @@ class DesktopGameApp:
         guide = [
             "Раскладка Геймпада для FPV Дрона: Левый стик — крен/ход, Правый стик — курс/тангаж, RT/LT — набор/снижение, LB — Форсаж, RB/A — Подрыв БЧ",
             "Раскладка Геймпада для Бензовоза: Левый стик — руль, RT/LT — газ/тормоз, Правый стик — прицел ПВО, LB — ЗПУ Турель, RB/B — Дробовик, X — РЭБ, Y — Дым",
-            "[M] Переключить режим FPV-Аппаратуры (Mode 2)   |   [R] Обновить USB устройства   |   [ESC] Вернуться в главное меню",
+            "[M] Переключить режим FPV-Аппаратуры (Mode 2)   |   [R] Обновить USB устройства   |   [- / =] Качество 3D-картинки   |   [ESC] Вернуться в главное меню",
+            "[C] Откалибровать центр стиков (отпустите стики и нажмите C) - значения осей в покое запоминаются в профиль",
         ]
         for gi, gline in enumerate(guide):
             gs = self.renderer.font_xs.render(gline, True, (195, 210, 228))

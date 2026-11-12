@@ -115,6 +115,7 @@ class Mesh3D:
         faces: np.ndarray,
         colors: np.ndarray,
         normals: Optional[np.ndarray] = None,
+        two_sided: Optional[np.ndarray] = None,
     ):
         self.vertices = np.asarray(vertices, dtype=np.float32)   # (V, 3)
         self.faces = np.asarray(faces, dtype=np.int32)           # (F, 3)
@@ -123,6 +124,13 @@ class Mesh3D:
             self.normals = self._compute_normals()
         else:
             self.normals = np.asarray(normals, dtype=np.float32)
+        # Двусторонние грани: рисуются с обеих сторон (тонкие балки без
+        # торцов, плоские разметки). Для них рендерер отключает
+        # backface-отсечение и освещает «по камере».
+        if two_sided is None:
+            self.two_sided = np.zeros(len(self.faces), dtype=bool)
+        else:
+            self.two_sided = np.asarray(two_sided, dtype=bool)
 
     def _compute_normals(self) -> np.ndarray:
         if len(self.faces) == 0:
@@ -143,6 +151,7 @@ class MeshBuilder:
         self.verts: List[Tuple[float, float, float]] = []
         self.faces: List[Tuple[int, int, int]] = []
         self.colors: List[Tuple[int, int, int]] = []
+        self.two_sided_flags: List[bool] = []
 
     def add_quad(
         self,
@@ -153,17 +162,21 @@ class MeshBuilder:
         color: Tuple[int, int, int],
         two_sided: bool = False,
     ) -> None:
+        """
+        Добавляет четырёхугольник (2 треугольника).
+
+        `two_sided=True` помечает грани как двусторонние: они рисуются
+        с обеих сторон (без дублирования геометрии - это экономит
+        треугольники по сравнению с добавлением обратных копий).
+        """
         base = len(self.verts)
         self.verts.extend([p0, p1, p2, p3])
         self.faces.append((base, base + 1, base + 2))
         self.colors.append(color)
+        self.two_sided_flags.append(two_sided)
         self.faces.append((base, base + 2, base + 3))
         self.colors.append(color)
-        if two_sided:
-            self.faces.append((base, base + 2, base + 1))
-            self.colors.append(color)
-            self.faces.append((base, base + 3, base + 2))
-            self.colors.append(color)
+        self.two_sided_flags.append(two_sided)
 
     def add_box(
         self,
@@ -206,6 +219,7 @@ class MeshBuilder:
         b: Tuple[float, float, float],
         thickness: float,
         color: Tuple[int, int, int],
+        two_sided: bool = False,
     ) -> None:
         va = np.array(a, dtype=np.float32)
         vb = np.array(b, dtype=np.float32)
@@ -242,12 +256,16 @@ class MeshBuilder:
                 min(255, int(color[1] * shade)),
                 min(255, int(color[2] * shade)),
             )
+            # Тонкие балки (подвески, каркас мангала, лучи дрона) не имеют
+            # торцовых крышек - с торца они «выглядывают» насквозь. Их грани
+            # помечаются двусторонними: рендерер рисует их с обеих сторон.
             self.add_quad(
                 tuple(corners_a[i]),
                 tuple(corners_a[ni]),
                 tuple(corners_b[ni]),
                 tuple(corners_b[i]),
                 col,
+                two_sided=two_sided,
             )
 
     def build(self) -> Mesh3D:
@@ -261,6 +279,7 @@ class MeshBuilder:
             np.array(self.verts, dtype=np.float32),
             np.array(self.faces, dtype=np.int32),
             np.array(self.colors, dtype=np.float32),
+            two_sided=np.array(self.two_sided_flags, dtype=bool),
         )
 
 
@@ -303,16 +322,11 @@ def build_crimean_bridge_mesh(barriers: List[AABB]) -> Tuple[Mesh3D, List[AABB]]
     mb = MeshBuilder()
     colliders: List[AABB] = list(barriers)
 
-    # 1. Sea surface chunks around the bridge
-    sea_seg_z = 16
-    z_min, z_max = -950.0, 950.0
-    dz_sea = (z_max - z_min) / sea_seg_z
-    for i in range(sea_seg_z):
-        sz0 = z_min + i * dz_sea
-        sz1 = sz0 + dz_sea
-        shade = 0.95 if (i % 2 == 0) else 1.03
-        c_sea = (int(24 * shade), int(84 * shade), int(138 * shade))
-        mb.add_quad((-420.0, 0.0, sz0), (-420.0, 0.0, sz1), (420.0, 0.0, sz1), (420.0, 0.0, sz0), c_sea)
+    # 1. Море рисуется НЕ геометрией, а отдельным экранным проходом в рендерере
+    #    (см. SceneRenderer3D._draw_sky_and_horizon).
+    #    Причина: плоские треугольники моря давали заметные горизонтальные
+    #    полосы из-за пошагового тумана + 700 лишних граней в кадре.
+    #    Здесь остаются только берега (материк), они выше уровня воды.
 
     # Distant Kerch & Taman coastlines
     mb.add_box(0.0, 14.0, -900.0, 520.0, 28.0, 110.0, (108, 122, 86), skip_bottom=True)
@@ -335,6 +349,7 @@ def build_crimean_bridge_mesh(barriers: List[AABB]) -> Tuple[Mesh3D, List[AABB]]
             (0.22, ROAD_DECK_Y + 0.06, cz + seg_len * 0.5),
             (0.22, ROAD_DECK_Y + 0.06, cz - seg_len * 0.5),
             (230, 232, 235),
+            two_sided=True,
         )
         for lane_x in (-6.5, 6.5):
             mb.add_quad(
@@ -343,6 +358,7 @@ def build_crimean_bridge_mesh(barriers: List[AABB]) -> Tuple[Mesh3D, List[AABB]]
                 (lane_x + 0.15, ROAD_DECK_Y + 0.06, cz + seg_len * 0.22),
                 (lane_x + 0.15, ROAD_DECK_Y + 0.06, cz - seg_len * 0.22),
                 (215, 215, 210),
+                two_sided=True,
             )
 
         # Side steel barrier rails (tricolor accent stripe along outer fascia)
@@ -437,8 +453,8 @@ def build_crimean_bridge_mesh(barriers: List[AABB]) -> Tuple[Mesh3D, List[AABB]]
             if 1 <= s <= arch_Steps - 1:
                 lx, ly, lz = pts_left[s]
                 rx, ry, rz = pts_right[s]
-                mb.add_beam((lx, base_y, lz), (lx, ly, lz), 0.22, (195, 202, 212))
-                mb.add_beam((rx, base_y, rz), (rx, ry, rz), 0.22, (195, 202, 212))
+                mb.add_beam((lx, base_y, lz), (lx, ly, lz), 0.22, (195, 202, 212), two_sided=True)
+                mb.add_beam((rx, base_y, rz), (rx, ry, rz), 0.22, (195, 202, 212), two_sided=True)
 
     build_arch_span(0.0, ROAD_HALF_WIDTH + 0.6, ROAD_DECK_Y, ARCH_PEAK_Y, add_colliders=True)
     build_arch_span(RAIL_CENTER_X, RAIL_HALF_WIDTH + 0.6, RAIL_DECK_Y, ARCH_PEAK_Y + 5.0, add_colliders=False)
@@ -470,6 +486,7 @@ def build_crimean_bridge_mesh(barriers: List[AABB]) -> Tuple[Mesh3D, List[AABB]]
             ((k + 1) * 2.0, ROAD_DECK_Y + 0.08, fz + 1.5),
             ((k + 1) * 2.0, ROAD_DECK_Y + 0.08, fz - 1.5),
             c_chk,
+            two_sided=True,
         )
 
     # Side guardrail boundary colliders
@@ -538,11 +555,11 @@ def build_fuel_truck_mesh(has_cage: bool = False, twin_turret: bool = False) -> 
         # Steel anti-drone cage ("Мангал") above tank and cab
         cage_col = (118, 126, 134)
         for cz in (-4.4, -1.3, 1.8, 4.6):
-            mb.add_beam((-1.65, 1.4, cz), (-1.65, 4.15, cz), 0.12, cage_col)
-            mb.add_beam((1.65, 1.4, cz), (1.65, 4.15, cz), 0.12, cage_col)
-            mb.add_beam((-1.65, 4.15, cz), (1.65, 4.15, cz), 0.12, cage_col)
+            mb.add_beam((-1.65, 1.4, cz), (-1.65, 4.15, cz), 0.12, cage_col, two_sided=True)
+            mb.add_beam((1.65, 1.4, cz), (1.65, 4.15, cz), 0.12, cage_col, two_sided=True)
+            mb.add_beam((-1.65, 4.15, cz), (1.65, 4.15, cz), 0.12, cage_col, two_sided=True)
         for sx in (-1.65, -0.8, 0.0, 0.8, 1.65):
-            mb.add_beam((sx, 4.15, -4.5), (sx, 4.15, 4.7), 0.10, cage_col)
+            mb.add_beam((sx, 4.15, -4.5), (sx, 4.15, 4.7), 0.10, cage_col, two_sided=True)
 
     return mb.build()
 
@@ -552,10 +569,10 @@ def build_turret_mesh(twin: bool = False) -> Mesh3D:
     mb = MeshBuilder()
     mb.add_box(0.0, 0.22, 0.0, 0.85, 0.42, 0.85, (72, 78, 86))
     if twin:
-        mb.add_beam((-0.24, 0.34, 0.1), (-0.24, 0.34, 1.75), 0.13, (45, 50, 56))
-        mb.add_beam((0.24, 0.34, 0.1), (0.24, 0.34, 1.75), 0.13, (45, 50, 56))
+        mb.add_beam((-0.24, 0.34, 0.1), (-0.24, 0.34, 1.75), 0.13, (45, 50, 56), two_sided=True)
+        mb.add_beam((0.24, 0.34, 0.1), (0.24, 0.34, 1.75), 0.13, (45, 50, 56), two_sided=True)
     else:
-        mb.add_beam((0.0, 0.34, 0.1), (0.0, 0.34, 1.65), 0.15, (45, 50, 56))
+        mb.add_beam((0.0, 0.34, 0.1), (0.0, 0.34, 1.65), 0.15, (45, 50, 56), two_sided=True)
     return mb.build()
 
 
@@ -576,7 +593,7 @@ def build_fpv_drone_mesh(shaped_charge: bool = False) -> Mesh3D:
     # 4 carbon arms + bright rotor rings
     arm_coords = [(-0.58, 0.52), (0.58, 0.52), (-0.58, -0.52), (0.58, -0.52)]
     for ax, az in arm_coords:
-        mb.add_beam((0.0, 0.0, 0.0), (ax, 0.02, az), 0.08, (60, 65, 72))
+        mb.add_beam((0.0, 0.0, 0.0), (ax, 0.02, az), 0.08, (60, 65, 72), two_sided=True)
         rotor_col = (245, 90, 45) if az > 0 else (90, 225, 110)
         mb.add_box(ax, 0.09, az, 0.48, 0.04, 0.48, rotor_col)
 

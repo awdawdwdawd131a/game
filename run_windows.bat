@@ -51,12 +51,19 @@ echo       This happens only once. Please keep the internet connection.
 if errorlevel 1 goto pip_failed
 "%PY%" -m pip install -r requirements.txt
 if errorlevel 1 goto pip_failed
+echo       Libraries installed successfully.
+goto run_game
 
 :pip_failed
+rem pip иногда возвращает ненулевой код, хотя пакеты установились.
+rem Проверяем фактический импорт перед тем, как считать это ошибкой.
+"%PY%" -c "import pygame, numpy, PIL" >nul 2>nul
+if not errorlevel 1 goto run_game
 echo.
 echo [ERROR] Installation of the libraries failed.
 echo         Check the internet connection or proxy settings and run this file again.
 echo         Make sure the archive was unpacked completely (do not run from inside the ZIP).
+echo         (pip output is shown above)
 goto failed
 
 :run_game
