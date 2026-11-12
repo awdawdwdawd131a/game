@@ -168,9 +168,15 @@ def _prepare_streams(repo_root: str) -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
             try:
-                reconfigure(encoding="utf-8", errors="replace")
+                # line_buffering=True: адрес сервера и статус появляются в консоли
+                # сразу, а не после заполнения буфера (важно при перенаправлении
+                # вывода в файл, например в тестах сборки).
+                reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
             except Exception:
-                pass
+                try:
+                    reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
 
     try:
         log_path = os.path.join(_log_dir(repo_root), "last_run.log")
