@@ -1,0 +1,19 @@
+# Windows batch files MUST have CRLF line endings and are stored exactly as written
+# (no automatic conversion), so that cmd.exe parses them correctly even when the
+# repository is downloaded as a ZIP archive.
+*.bat -text
+
+# Unix shell scripts and sources must keep LF endings
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary assets must never be touched
+*.jpg binary
+*.png binary
+*.ico binary
+*.wav binary
