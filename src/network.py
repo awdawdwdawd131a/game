@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 from typing import Dict, Optional, Tuple
@@ -69,6 +71,77 @@ def get_local_lan_ip() -> str:
         return ip
     except OSError:
         return "127.0.0.1"
+
+
+def get_all_local_ips() -> list:
+    """
+    Все IPv4-адреса этого ПК (кроме служебных).
+
+    Нужно, потому что у хоста может быть несколько сетевых интерфейсов:
+    обычная домашняя LAN (192.168.x.x), Radmin VPN (26.x.x.x), ZeroTier и т.д.
+    Другу надо давать адрес ИМЕННО того интерфейса, через который он
+    подключается, поэтому показываем все варианты.
+    """
+    ips = []
+    # 1) Основной интерфейс по маршруту по умолчанию
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127."):
+            ips.append(ip)
+    except OSError:
+        pass
+
+    # 2) Все адреса всех интерфейсов (Windows / Linux / macOS)
+    try:
+        if sys.platform.startswith("win"):
+            out = subprocess.run(
+                ["ipconfig"], capture_output=True, text=True, timeout=4, encoding="utf-8", errors="ignore"
+            ).stdout
+            for line in out.splitlines():
+                line = line.strip()
+                if not line.startswith("IPv4"):
+                    continue
+                for part in line.replace(":", " ").split():
+                    parts = part.split(".")
+                    if len(parts) == 4 and all(p.isdigit() for p in parts):
+                        addr = ".".join(parts)
+                        if not addr.startswith("127.") and addr not in ips:
+                            ips.append(addr)
+        else:
+            out = subprocess.run(
+                ["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=4
+            ).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if "inet" in parts:
+                    idx = parts.index("inet")
+                    if idx + 1 < len(parts):
+                        addr = parts[idx + 1].split("/")[0]
+                        if not addr.startswith("127.") and addr not in ips:
+                            ips.append(addr)
+    except Exception:
+        pass
+
+    return ips
+
+
+def describe_connection_targets(port: int) -> list:
+    """
+    Готовые строки «что вписать другу» для подключения к серверу.
+
+    Для каждого сетевого интерфейса показываем адрес и порт. Radmin VPN
+    выдаёт адреса вида 26.x.x.x - именно их нужно сообщать другу, если он
+    тоже подключён к той же виртуальной сети.
+    """
+    lines = []
+    for ip in get_all_local_ips():
+        lines.append(f"{ip}:{port}")
+    if not lines:
+        lines.append(f"127.0.0.1:{port}")
+    return lines
 
 
 class GameServer:

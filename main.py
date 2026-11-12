@@ -225,15 +225,18 @@ def _check_dependencies() -> None:
 # -----------------------------------------------------------------------------
 def run_headless_server(host: str, port: int, bot_fill: bool) -> int:
     from src.config import WEATHER_BY_ID
-    from src.network import GameServer, get_local_lan_ip
+    from src.network import GameServer, describe_connection_targets
 
     srv = GameServer(host=host, port=port, fill_with_bot=bot_fill)
     bound = srv.start()
-    lan_ip = get_local_lan_ip()
+    targets = describe_connection_targets(bound)
     _safe_print("=" * 74)
     _safe_print(" ВЫДЕЛЕННЫЙ СЕРВЕР «КРЫМСКИЙ МОСТ 1v1» ЗАПУЩЕН!")
     _safe_print(f" Слушает адрес:  {host}:{bound}")
-    _safe_print(f" Локальный/VPN IP этого ПК для подключения игроков: {lan_ip}:{bound}")
+    _safe_print(" Что вписать другу в поле «IP» (выберите тот адрес, по которому он подключается):")
+    for t in targets:
+        _safe_print(f"    -> {t}")
+    _safe_print("   (26.x.x.x — это Radmin VPN; 192.168.x.x — обычная домашняя сеть)")
     _safe_print(f" Заполнение пустого слота ИИ-ботом: {'ВКЛ' if bot_fill else 'ВЫКЛ'}")
     _safe_print(" Нажмите Ctrl+C для остановки сервера.")
     _safe_print("=" * 74)

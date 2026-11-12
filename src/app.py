@@ -29,7 +29,7 @@ from .controls import (
     JoystickProfile,
     key_name,
 )
-from .network import GameClient, GameServer, get_local_lan_ip
+from .network import GameClient, GameServer, get_all_local_ips, get_local_lan_ip
 from .physics import WorldSimulation
 from .renderer import Camera3D, SceneRenderer3D
 from .selftest import CheckResult, run_verification_suite
@@ -82,6 +82,9 @@ class DesktopGameApp:
         self.host_bot_fill: bool = False
         self.status_banner: str = ""
         self.lan_ip: str = get_local_lan_ip()
+        # Все сетевые интерфейсы (LAN + Radmin VPN + ZeroTier): другу надо
+        # сообщить адрес ИМЕННО того интерфейса, через который он подключается.
+        self.lan_ips: list = get_all_local_ips()
 
         self.hosted_server: Optional[GameServer] = None
         self.net_client: Optional[GameClient] = None
@@ -222,6 +225,7 @@ class DesktopGameApp:
             self.running = False
         elif action == "HOST_SETUP":
             self.lan_ip = get_local_lan_ip()
+            self.lan_ips = get_all_local_ips()
             self.active_field = "port"
             self.state = "HOST_SETUP"
         elif action == "JOIN_SETUP":
@@ -645,8 +649,9 @@ class DesktopGameApp:
             self.screen.blit(err, (cx - err.get_width() // 2, h - 64))
 
         joy_cnt = len(self.controls.get_joystick_Snapshot())
+        ips_txt = ", ".join((self.lan_ips or [self.lan_ip])[:3])
         footer = self.renderer.font_xs.render(
-            f"Управление: Мышь+Клавиатура / Геймпад / FPV-Пульт (обнаружено джойстиков: {joy_cnt})  |  Локальный IP: {self.lan_ip}",
+            f"Управление: Мышь+Клавиатура / Геймпад / FPV-Пульт (обнаружено джойстиков: {joy_cnt})  |  Ваш IP: {ips_txt}",
             True,
             (165, 185, 208),
         )
@@ -671,12 +676,23 @@ class DesktopGameApp:
         y = py + 86
         if is_host:
             info = self.renderer.font_sm.render(
-                f"Сообщите другу ваш IP-адрес (LAN / Radmin VPN / ZeroTier):  {self.lan_ip}",
+                "Сообщите другу адрес, по которому ОН подключается к вам:",
                 True,
                 (125, 235, 165),
             )
             self.screen.blit(info, (px + 36, y))
-            y += 46
+            y += 30
+            hosts = self.lan_ips or [self.lan_ip]
+            for hip in hosts[:4]:
+                kind = "Radmin VPN / виртуальная сеть" if hip.startswith("26.") else (
+                    "домашняя сеть (LAN)" if hip.startswith(("192.168.", "10.", "172.")) else "сетевой интерфейс"
+                )
+                row = self.renderer.font_xs.render(
+                    f"    {hip}:{self.port_input}    ({kind})", True, (215, 235, 250)
+                )
+                self.screen.blit(row, (px + 36, y))
+                y += 24
+            y += 8
         else:
             ip_sel = self.active_field == "ip"
             lbl = self.renderer.font_md.render(
