@@ -78,7 +78,7 @@ def _http_get(url: str, timeout: float = 4.0) -> Optional[str]:
         return None
 
 
-def fetch_public_ip(timeout: float = 5.0) -> Optional[str]:
+def fetch_public_ip(timeout: float = 3.0) -> Optional[str]:
     """Определяет внешний IP через бесплатные публичные сервисы."""
     for url in PUBLIC_IP_SERVICES:
         body = _http_get(url, timeout=timeout)

@@ -141,17 +141,19 @@ jobs:
           if (-not $ok) {
             # Логи CI лежат на внешнем хранилище, поэтому дублируем отчет в issue -
             # так его всегда можно прочитать через API.
-            $body = @"
-            Avtomaticheskaya proverka sobrannyh .exe ne proshla.
-
-            Commit: ${{ github.sha }}
-            Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            ```
-            $text
-            ```
-            "@@
-            gh issue create --title "Windows build failed: ${{ github.sha }}" --body $body 2>&1 | Out-Host
+            $sha = "${{ github.sha }}"
+            $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            $reportFile = Join-Path $dist "ci_report.txt"
+            $lines = New-Object System.Collections.Generic.List[string]
+            $lines.Add("Windows build FAILED")
+            $lines.Add("")
+            $lines.Add("Commit: $sha")
+            $lines.Add("Build:  $runUrl")
+            $lines.Add("")
+            $lines.Add("----")
+            $lines.Add($text)
+            $lines | Out-File -FilePath $reportFile -Encoding utf8
+            gh issue create --title "Windows build failed: $sha" --body-file $reportFile 2>&1 | Out-Host
             exit 1
           }
 
