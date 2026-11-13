@@ -398,10 +398,6 @@ class GameServer:
                     self.sim.step(DT, d_in, t_in)
                 else:
                     # Hold draft timer while waiting for 2nd PC player to connect
-                    if d_in.pick_modifier:
-                        self.sim.drone_mod = d_in.pick_modifier
-                    if t_in.pick_modifier:
-                        self.sim.truck_mod = t_in.pick_modifier
                     self.sim.last_event_ru = "Ожидание подключения 2-го игрока по сети..."
 
                 tick_idx += 1

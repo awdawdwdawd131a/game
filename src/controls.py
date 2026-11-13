@@ -17,7 +17,6 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 
-from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS
 from .math3d import clamp
 from .physics import DroneInput, TruckInput
 
@@ -187,7 +186,8 @@ class InputController:
         self.profile = profile or JoystickProfile()
         self._joysticks: Dict[int, pygame.joystick.JoystickType] = {}
         self.active_joy_id: Optional[int] = None
-        self.acro_toggle: bool = False
+        # Default to harder Acro (manual rate/attitude hold) for FPV drone; X toggles Angle assist
+        self.acro_toggle: bool = True
 
         # One-shot button/key latch states per frame.
         # Фиксаторы РАЗДЕЛЕНЫ по ролям: иначе клавиши F/E/Q (одинаковые
@@ -197,9 +197,6 @@ class InputController:
         self._one_truck_ew = False       # РЭБ-купол (роль: бензовоз)
         self._one_truck_smoke = False    # дымовая завеса (роль: бензовоз)
         self._one_ready = False
-        self._picked_mod_slot: Optional[int] = None  # 0..4 when pressing 1..5 or D-pad (this frame)
-        # Persistent modifier choice (kept between frames so 1..5 then Enter works)
-        self.selected_mod_slot: Optional[int] = None
 
         self.refresh_joysticks()
 
@@ -231,22 +228,7 @@ class InputController:
             return
 
         if event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_1, pygame.K_KP1):
-                self._picked_mod_slot = 0
-                self.selected_mod_slot = 0
-            elif event.key in (pygame.K_2, pygame.K_KP2):
-                self._picked_mod_slot = 1
-                self.selected_mod_slot = 1
-            elif event.key in (pygame.K_3, pygame.K_KP3):
-                self._picked_mod_slot = 2
-                self.selected_mod_slot = 2
-            elif event.key in (pygame.K_4, pygame.K_KP4):
-                self._picked_mod_slot = 3
-                self.selected_mod_slot = 3
-            elif event.key in (pygame.K_5, pygame.K_KP5):
-                self._picked_mod_slot = 4
-                self.selected_mod_slot = 4
-            elif event.key in (pygame.K_KP_ENTER, pygame.K_r):
+            if event.key in (pygame.K_KP_ENTER, pygame.K_r):
                 self._one_ready = True
             elif event.key == self.key_for("truck_ready"):
                 self._one_ready = True
@@ -287,21 +269,6 @@ class InputController:
                 self._one_truck_smoke = True
             if btn == 6:
                 self.acro_toggle = not self.acro_toggle
-
-        elif event.type == pygame.JOYHATMOTION:
-            hx, hy = event.value
-            if hy > 0:
-                self._picked_mod_slot = 0
-                self.selected_mod_slot = 0
-            elif hx > 0:
-                self._picked_mod_slot = 1
-                self.selected_mod_slot = 1
-            elif hy < 0:
-                self._picked_mod_slot = 2
-                self.selected_mod_slot = 2
-            elif hx < 0:
-                self._picked_mod_slot = 3
-                self.selected_mod_slot = 3
 
     def get_joystick_Snapshot(self) -> List[JoystickStatus]:
         out: List[JoystickStatus] = []
@@ -460,11 +427,6 @@ class InputController:
                 yaw_d += rx * self.profile.look_sensitivity * dt
                 pitch_d += ry * self.profile.look_sensitivity * dt
 
-        pick_mod = ""
-        slot = self.selected_mod_slot if self.selected_mod_slot is not None else self._picked_mod_slot
-        if slot is not None and 0 <= slot < len(DRONE_MODIFIERS):
-            pick_mod = DRONE_MODIFIERS[slot].id
-
         inp = DroneInput(
             throttle=clamp(throttle, -1.0, 1.0),
             forward_Axis=clamp(fwd, -1.0, 1.0),
@@ -474,7 +436,6 @@ class InputController:
             boost=boost,
             detonate=self._one_detonate,
             acro_mode=self.acro_toggle,
-            pick_modifier=pick_mod,
             ready=self._one_ready,
         )
         self._clear_latches()
@@ -520,11 +481,6 @@ class InputController:
             aim_yaw_d += rx * self.profile.look_sensitivity * dt
             aim_pitch_d += ry * self.profile.look_sensitivity * dt
 
-        pick_mod = ""
-        slot = self.selected_mod_slot if self.selected_mod_slot is not None else self._picked_mod_slot
-        if slot is not None and 0 <= slot < len(TRUCK_MODIFIERS):
-            pick_mod = TRUCK_MODIFIERS[slot].id
-
         inp = TruckInput(
             accel=clamp(accel, -1.0, 1.0),
             steer=clamp(steer, -1.0, 1.0),
@@ -534,7 +490,6 @@ class InputController:
             fire_shotgun=self._one_truck_shotgun,
             trigger_ew=self._one_truck_ew,
             trigger_smoke=self._one_truck_smoke,
-            pick_modifier=pick_mod,
             ready=self._one_ready,
         )
         self._clear_latches()
@@ -546,4 +501,3 @@ class InputController:
         self._one_truck_ew = False
         self._one_truck_smoke = False
         self._one_ready = False
-        self._picked_mod_slot = None

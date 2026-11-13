@@ -3,7 +3,7 @@ Configuration, constants, weather presets, and round modifiers
 for Crimean Bridge 1v1 (FPV Drone vs Fuel Truck).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@ TICK_RATE = 60
 DT = 1.0 / TICK_RATE
 MAX_ROUNDS_TO_WIN = 3        # Best of 5 (first to 3 wins)
 ROUND_TIME_LIMIT = 95.0      # Seconds per round before truck auto-survives if close or timeout
-MODIFIER_PICK_TIME = 18.0    # Seconds in pre-round draft phase
+MODIFIER_PICK_TIME = 10.0    # Seconds in pre-round random loadout briefing phase
 ROUND_END_DELAY = 4.5        # Seconds showing round winner banner
 
 # ---------------------------------------------------------------------------
@@ -38,53 +38,56 @@ PILLAR_SPACING = 110.0
 NUM_BARRIERS = 14
 
 # ---------------------------------------------------------------------------
-# Base Vehicle & Drone Stats
+# Base Vehicle & Drone Stats (Rebalanced for fair 1v1 defense & real ballistics)
 # ---------------------------------------------------------------------------
-TRUCK_BASE_HP = 100.0
-TRUCK_BASE_MAX_SPEED = 24.0      # m/s (~86 km/h)
-TRUCK_BASE_ACCEL = 11.5          # m/s^2
-TRUCK_BASE_BRAKE = 22.0          # m/s^2
-TRUCK_STEER_RATE = 1.65          # rad/s max steer
+TRUCK_BASE_HP = 125.0
+TRUCK_BASE_MAX_SPEED = 23.5      # m/s (~85 km/h)
+TRUCK_BASE_ACCEL = 13.0          # m/s^2
+TRUCK_BASE_BRAKE = 24.0          # m/s^2
+TRUCK_STEER_RATE = 1.75          # rad/s max steer
 TRUCK_LENGTH = 11.5
 TRUCK_WIDTH = 3.1
 TRUCK_HEIGHT = 3.7
 
-# Truck Anti-FPV Weapons
-SHOTGUN_COOLDOWN = 0.72          # Pump-action / semi-auto anti-drone shotgun
-SHOTGUN_PELLETS = 11
-SHOTGUN_SPREAD_DEG = 5.2
-SHOTGUN_RANGE = 95.0             # Effective only at close range (anti-drone "Перехват")
-SHOTGUN_PELLET_DMG = 6.0
+# Truck Anti-FPV Weapons (Physical 3D projectile ballistics!)
+SHOTGUN_COOLDOWN = 0.56          # Semi-auto anti-drone shotgun
+SHOTGUN_PELLETS = 14
+SHOTGUN_SPREAD_DEG = 4.5
+SHOTGUN_RANGE = 115.0            # Effective close/mid-range buckshot envelope
+SHOTGUN_PELLET_DMG = 9.0
+SHOTGUN_PELLET_SPEED = 250.0     # m/s muzzle velocity (subject to high air drag & gravity)
+SHOTGUN_PELLET_DRAG = 0.78
 
-TURRET_FIRE_INTERVAL = 0.14      # Heavy roof machinegun / rapid AA
-TURRET_HEAT_PER_SHOT = 0.075
-TURRET_COOL_RATE = 0.28
-TURRET_RANGE = 170.0             # The drone must close in under the fire arc
-TURRET_BULLET_SPEED = 260.0
-TURRET_DMG = 7.0                 # ~14 hits to down a stock FPV frame
-TURRET_LOCK_TIME = 0.80          # Time the gunner needs to keep the drone in the reticle
-TURRET_LOCK_CONE = 0.18          # radians, half-angle of the tracking cone
+TURRET_FIRE_INTERVAL = 0.12      # Heavy roof machinegun / rapid AA (~500 rpm)
+TURRET_HEAT_PER_SHOT = 0.045
+TURRET_COOL_RATE = 0.38
+TURRET_RANGE = 260.0             # Ballistic range; bullets drop & slow down with distance
+TURRET_BULLET_SPEED = 360.0      # m/s muzzle velocity (requires real lead against moving FPV)
+TURRET_BULLET_DRAG = 0.16
+TURRET_DMG = 12.0                # Honest ballistic hit damage (~8-9 hits down a stock 100 HP FPV)
+TURRET_LOCK_TIME = 0.65          # Ballistic FCS tracking buildup (no damage nerf on hits!)
+TURRET_LOCK_CONE = 0.22          # radians, half-angle of tracking cone
 
-EW_JAMMER_DURATION = 4.0         # Electronic Warfare (РЭБ) active pulse
-EW_JAMMER_COOLDOWN = 14.0
-EW_JAMMER_RADIUS = 85.0
+EW_JAMMER_DURATION = 5.0         # Electronic Warfare (РЭБ) active pulse
+EW_JAMMER_COOLDOWN = 11.0
+EW_JAMMER_RADIUS = 105.0
 
-SMOKE_DURATION = 5.5             # Aerosol smoke screen
-SMOKE_COOLDOWN = 16.0
-SMOKE_RADIUS = 28.0
+SMOKE_DURATION = 6.5             # Aerosol smoke screen
+SMOKE_COOLDOWN = 12.0
+SMOKE_RADIUS = 34.0
 
-# FPV Drone Base Stats
+# FPV Drone Base Stats (Challenging realistic quadcopter flight dynamics)
 DRONE_BASE_HP = 100.0
 DRONE_BASE_LIVES = 3             # 3 FPV drones in operator's quiver per round
-DRONE_RESPAWN_DELAY = 2.5
+DRONE_RESPAWN_DELAY = 3.2
 DRONE_MAX_SPEED = 54.0           # m/s (~194 km/h fast FPV)
-DRONE_THRUST = 38.0              # m/s^2 upward/forward thrust
+DRONE_THRUST = 34.0              # m/s^2 rotor thrust along tilted quad axis
 DRONE_GRAVITY = 9.81
-DRONE_DRAG = 0.42
-DRONE_BATTERY_SECONDS = 55.0     # Flight time per drone before battery dies
+DRONE_DRAG = 0.15                # Lower artificial drag -> real momentum/inertia & high dive speed!
+DRONE_BATTERY_SECONDS = 45.0     # Flight time per drone before battery dies
 DRONE_EXPLOSION_RADIUS = 13.5
-DRONE_DIRECT_DAMAGE = 62.0       # 2 clean hits destroy base truck (or 1 shaped-charge hit + splash)
-DRONE_DETONATE_COOLDOWN = 2.5    # Re-arm time of the warhead after a stand-off airburst
+DRONE_DIRECT_DAMAGE = 66.0       # 2 clean direct kamikaze strikes destroy a stock 125 HP truck!
+DRONE_DETONATE_COOLDOWN = 4.0    # Re-arm time of the warhead after a stand-off airburst
 DRONE_TRIGGER_DIST = 4.2         # Proximity / impact detonation radius
 
 
@@ -173,7 +176,7 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         sun_color=(226, 230, 234),
         sun_azimuth=3.15,
         sun_elevation=0.4,
-        city_lights=0.3,
+        city_lights=0.0,
         sea_wave=0.12,
     ),
     WeatherPreset(
@@ -200,7 +203,7 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         sun_color=(120, 126, 136),
         sun_azimuth=2.9,
         sun_elevation=0.28,
-        city_lights=0.4,
+        city_lights=0.35,
         sea_wave=0.85,
     ),
     WeatherPreset(
@@ -227,7 +230,7 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         sun_color=(255, 196, 104),
         sun_azimuth=3.6,
         sun_elevation=0.14,
-        city_lights=0.25,
+        city_lights=0.0,
         sea_wave=0.7,
     ),
     WeatherPreset(
@@ -281,7 +284,7 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         sun_color=(228, 234, 242),
         sun_azimuth=3.0,
         sun_elevation=0.45,
-        city_lights=0.35,
+        city_lights=0.0,
         sea_wave=0.6,
     ),
 ]
@@ -290,7 +293,7 @@ WEATHER_BY_ID: Dict[str, WeatherPreset] = {w.id: w for w in WEATHER_PRESETS}
 
 
 # ---------------------------------------------------------------------------
-# Modifiers / Perks System for BOTH Players
+# Expanded Modifiers Pool (Issued Randomly Each Round!)
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ModifierDef:
@@ -299,7 +302,7 @@ class ModifierDef:
     name_ru: str
     short_ru: str
     desc_ru: str
-    key_hint: str
+    key_hint: str = ""
 
 
 DRONE_MODIFIERS: List[ModifierDef] = [
@@ -307,41 +310,71 @@ DRONE_MODIFIERS: List[ModifierDef] = [
         id="shaped_charge",
         role="drone",
         name_ru="Кумулятивная БЧ (ПГ-7ВЛ)",
-        short_ru="+45% урона, -12% скорости",
-        desc_ru="Тяжёлый выстрел РПГ под брюхом: огромный урон по цистерне, но выше масса и инерция.",
-        key_hint="1",
+        short_ru="+40% урона БЧ, -12% скорости и тяги",
+        desc_ru="Тяжёлая граната РПГ под рамой: мощнейший удар по броне цистерны, но дрон тяжелее и инертнее.",
     ),
     ModifierDef(
         id="fiber_optic",
         role="drone",
         name_ru="Оптоволокно (Иммунитет к РЭБ)",
-        short_ru="Полная защита от РЭБ, +20% батареи",
-        desc_ru="Управление по катушке оптоволокна: глушилка бензовоза не даёт помех и не блокирует рули.",
-        key_hint="2",
+        short_ru="Полная защита от РЭБ, +20% батареи, -6% скорости",
+        desc_ru="Катушка оптоволокна: РЭБ бензовоза вообще не глушит видео и рули, но катушка даёт лёгкое сопротивление.",
     ),
     ModifierDef(
         id="sport_motors",
         role="drone",
-        name_ru="Форсажные бесколлекторники",
-        short_ru="+28% тяги и макс. скорости",
-        desc_ru="Гоночные моторы и 6S LiPo: молниеносный пикирующий заход и кнопка нитро-рывка.",
-        key_hint="3",
+        name_ru="Форсажные бесколлекторники 6S",
+        short_ru="+25% тяги и макс. скорости, мощный форсаж",
+        desc_ru="Гоночные моторы: молниеносное пикирование и уклонение от трассеров, но высокий расход батареи на форсаже.",
     ),
     ModifierDef(
         id="kevlar_frame",
         role="drone",
         name_ru="Кевларовая рама + Доп. борт",
-        short_ru="+1 запасной FPV дрон и +45% HP",
-        desc_ru="Усиленные лучи выдерживают часть дроби, плюс +1 дополнительный дрон в раунде.",
-        key_hint="4",
+        short_ru="+1 запасной FPV дрон (4 всего) и +45% HP рамы",
+        desc_ru="Усиленная карбон-кевларовая рама держит больше попаданий пуль и дроби, плюс дополнительный борт в запасе.",
     ),
     ModifierDef(
         id="airburst_frag",
         role="drone",
         name_ru="Осколочный подрыв + Тепловизор",
-        short_ru="+55% радиус взрыва и подсветка цели",
-        desc_ru="Дистанционный подрыв шрапнелью накрывает даже в дыму и тумане, контур цели виден сквозь мглу.",
-        key_hint="5",
+        short_ru="+55% радиус взрыва и ИК-подсветка цели",
+        desc_ru="Мощный осколочный разлёт накрывает бензовоз с дистанции, а тепловизор подсвечивает тягач в тумане и дыму.",
+    ),
+    ModifierDef(
+        id="stealth_matte",
+        role="drone",
+        name_ru="Стелс-рама (Малозаметный профиль)",
+        short_ru="-30% хитбокс под обстрелом, скрыт от радара >45м",
+        desc_ru="Матовый мини-корпус и тихие винты: труднее зацепить пулей и не подсвечивается меткой у стрелка на дистанции.",
+    ),
+    ModifierDef(
+        id="wind_gyro",
+        role="drone",
+        name_ru="Цифровой гиростабилизатор ветра",
+        short_ru="-75% сноса от ветра и шквала, +25% точность рулей",
+        desc_ru="Продвинутый полётный контроллер компенсирует боковой ветер и турбулентность даже в бурю и бору.",
+    ),
+    ModifierDef(
+        id="tandem_warhead",
+        role="drone",
+        name_ru="Тандемная БЧ (Пробив «Мангала»)",
+        short_ru="Игнорирует антидрон-сетку, +20% урона в упор",
+        desc_ru="Лидерный предзаряд прожигает стальной «мангал» и наносит полный урон основной струёй прямо в цистерну.",
+    ),
+    ModifierDef(
+        id="cluster_munitions",
+        role="drone",
+        name_ru="Кассетный сброс (3 суббоеприпаса)",
+        short_ru="Быстрый откат БЧ (2.2с), сброс 3 падающих гранат",
+        desc_ru="При дистанционном подрыве сбрасывает 3 падающие гранаты с разлётом по площади — легко задеть маневрирующую цель.",
+    ),
+    ModifierDef(
+        id="long_range_lipo",
+        role="drone",
+        name_ru="Батарея Li-Ion 8000mAh + Усиление",
+        short_ru="+75% времени полёта и +25% HP рамы",
+        desc_ru="Огромный запас энергии для затяжного выжидания ошибки стрелка и многократных заходов с высоты.",
     ),
 ]
 
@@ -350,41 +383,71 @@ TRUCK_MODIFIERS: List[ModifierDef] = [
         id="anti_drone_cage",
         role="truck",
         name_ru="Антидроновый «Мангал» и сетка",
-        short_ru="-35% входящего урона от взрывов",
-        desc_ru="Стальная решётка над кабиной и цистерной взводит гранату раньше времени, снижая урон.",
-        key_hint="1",
+        short_ru="-35% урона от БЧ и +20 к макс. броне (145 HP)",
+        desc_ru="Стальной каркас над кабиной и цистерной взводит заряд раньше времени, резко снижая фугасный урон.",
     ),
     ModifierDef(
         id="ew_kupol",
         role="truck",
         name_ru="Мощный РЭБ «Купол-М»",
-        short_ru="+60% радиус РЭБ, быстрее откат",
-        desc_ru="Широкополосная станция помех глушит видеолинк FPV и уводит рули дрона на большой дистанции.",
-        key_hint="2",
+        short_ru="+60% радиус РЭБ (168м), дольше работа и быстрее откат",
+        desc_ru="Широкополосная глушилка засыпает экран оператора помехами и уводит рули радио-дрона на подлёте.",
     ),
     ModifierDef(
         id="twin_zu_turret",
         role="truck",
-        name_ru="Спаренная зенитная турель",
-        short_ru="Двойной темп огня и -40% нагрева",
-        desc_ru="Усиленная турель на крыше кабины с высокой плотностью огня и увеличенным уроном по FPV.",
-        key_hint="3",
+        name_ru="Спаренная зенитная турель ЗУ-23",
+        short_ru="Почти вдвое выше темп огня, -40% нагрева, +15% скорость пуль",
+        desc_ru="Два ствола создают плотную свинцовую стену в небе с высокой начальной скоростью пули.",
     ),
     ModifierDef(
         id="v12_biturbo",
         role="truck",
         name_ru="Форсированный V12 + Шипы",
-        short_ru="+26% скорости, +35% разгона и зацепа",
-        desc_ru="Тягач летит по мосту на максималке и уверенно держит трассу даже в гололёд и шторм.",
-        key_hint="4",
+        short_ru="+25% макс. скорости (~106 км/ч), +35% разгона и зацеп",
+        desc_ru="Тягач рвёт к финишу на пределе и уверенно держит дорогу даже в шторм и гололёд.",
     ),
     ModifierDef(
         id="buckshot_radar",
         role="truck",
-        name_ru="Картечь «Перехват» + Радар + Дым",
-        short_ru="Двойная картечь, радар дистанции и быстрый дым",
-        desc_ru="Ружьё стреляет плотным облаком вольфрамовой дроби, а дымовые гранаты перезаряжаются вдвое быстрее.",
-        key_hint="5",
+        name_ru="Картечь «Перехват» + Радар ПВО",
+        short_ru="28 дробин, упреждение на 240м и быстрый дым",
+        desc_ru="Двойной заряд вольфрамовой дроби срубает пикирующий FPV одним залпом, а радар рисует точку упреждения.",
+    ),
+    ModifierDef(
+        id="ballistic_computer",
+        role="truck",
+        name_ru="Баллистический вычислитель ПВО",
+        short_ru="Точное упреждение до 260м, +25% скорость пуль, -25% разброс",
+        desc_ru="Оптико-лазерный прицел точно просчитывает падение и скорость пули на 450 м/с для снайперского перехвата.",
+    ),
+    ModifierDef(
+        id="reactive_armor",
+        role="truck",
+        name_ru="Динамическая защита «Контакт»",
+        short_ru="Первый удар БЧ гасится на 65% + +15 к броне (140 HP)",
+        desc_ru="Блоки ДЗ на цистерне отбивают первую атаку FPV встречным импульсом, спасая машину в критический момент.",
+    ),
+    ModifierDef(
+        id="flak_shrapnel",
+        role="truck",
+        name_ru="Зенитные снаряды с радиовзрывателем",
+        short_ru="+55% радиус поражения пуль (воздушный подрыв)",
+        desc_ru="Пули турели подрываются при пролёте рядом с рамой FPV, сбивая дрон даже при близких промахах.",
+    ),
+    ModifierDef(
+        id="auto_extinguisher",
+        role="truck",
+        name_ru="Автопожаротушение + Усиленный бак",
+        short_ru="+35 к броне (160 HP), авторемонт +2.5 HP/с",
+        desc_ru="Пенная система и толстая стенка бака гасят последствия попаданий и постепенно латают цистерну на ходу.",
+    ),
+    ModifierDef(
+        id="flamethrower_smoke",
+        role="truck",
+        name_ru="Термодымовая завеса ТДА",
+        short_ru="Гигантская дымзавеса (2 облака, 9с) + быстрее откат РЭБ/дыма",
+        desc_ru="Густой термодым накрывает участок моста за тягачом, скрывая бензовоз даже от ИК-тепловизора на дистанции.",
     ),
 ]
 
