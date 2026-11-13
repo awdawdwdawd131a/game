@@ -89,12 +89,6 @@ class SceneRenderer3D:
         self.easter_egg_thumb: Optional[pygame.Surface] = self._load_chereshnya_thumb()
         self._rng = np.random.default_rng(99)
 
-        # --- Производительность: внутренний масштаб рендера 3D-сцены -------------
-        # 1.0 = полное разрешение, 0.6 = 60% (сильно быстрее на слабых ПК).
-        self.render_scale = 1.0
-        self._world_surface: Optional[pygame.Surface] = None
-        self._world_size = (0, 0)
-
         # --- Небо: звёзды, луна, солнце, облака, огни города ---------------------
         self._stars = self._make_stars(340)
         self._clouds = self._make_clouds(96)
@@ -119,6 +113,8 @@ class SceneRenderer3D:
         self._render_scale_target = 1.0  # желаемый масштаб (1.0 = native)
         self._frame_ms_avg = 0.0         # сглаженное время кадра
         self._scale_cooldown = 0.0       # кадры до следующей подстройки
+        self._world_surface: Optional[pygame.Surface] = None
+        self._world_size = (0, 0)
         self._world_buf: Optional[pygame.Surface] = None
         self._world_up: Optional[pygame.Surface] = None
 
@@ -301,17 +297,13 @@ class SceneRenderer3D:
         f_norms: np.ndarray,
         f_two_sided: np.ndarray,
         near_z: float,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        f_bias: Optional[np.ndarray] = None,
+    ):
         """
         Разрезает треугольники, пересекающие ближнюю плоскость z = near_z.
 
-        Треугольник может дать 1 или 2 новых треугольника. Реализовано
-        векторно: для каждой грани считаются точки пересечения рёбер с
-        плоскостью, затем собираются новые треугольники.
-
-        Без этого клиппинга грани, проходящие через плоскость камеры,
-        исчезали целиком - вблизи камеры (например, полотно моста под
-        дроном) пропадали большие куски геометрии.
+        Если передан `f_bias`, возвращает 7-й элемент `new_bias`; без него
+        сохраняется прежний 6-кортеж для совместимости с автотестами.
         """
         z0 = v0[:, 2]
         z1 = v1[:, 2]
@@ -320,10 +312,8 @@ class SceneRenderer3D:
         d1 = z1 - near_z
         d2 = z2 - near_z
 
-        # Классификация: сколько вершин «за камерой»
         behind = (d0 < 0).astype(np.int8) + (d1 < 0).astype(np.int8) + (d2 < 0).astype(np.int8)
 
-        # Точка пересечения ребра (a -> b) с плоскостью
         def _cut(a: np.ndarray, b: np.ndarray, da: np.ndarray, db: np.ndarray) -> np.ndarray:
             denom = db - da
             t = np.where(np.abs(denom) > 1e-9, -da / np.where(np.abs(denom) > 1e-9, denom, 1.0), 0.0)
@@ -335,19 +325,11 @@ class SceneRenderer3D:
         new_cols: List[np.ndarray] = []
         new_norms: List[np.ndarray] = []
         new_ts: List[np.ndarray] = []
+        new_bias: List[np.ndarray] = []
 
-        # --- 1 вершина за камерой: остаются 2 -> видимая часть - ЧЕТЫРЁХУГОЛЬНИК
-        #      p_ab -> vb -> vc -> p_ca, который режется на два треугольника.
-        #
-        # Раньше здесь собирался ОДИН треугольник (p_ab, va, p_ca) с вершиной
-        # va, лежащей ЗА камерой: из-за этого у моста под дроном появлялись
-        # дыры и вытянутые «лоскуты» геометрии. Теперь оба треугольника
-        # лежат строго перед плоскостью, а обход вершин сохраняет исходную
-        # ориентацию грани (важно для backface-отсечения).
         m1 = behind == 1
         if np.any(m1):
             idx = np.nonzero(m1)[0]
-            # Индекс единственной вершины за камерой (первая True в столбце)
             i0 = np.argmax(np.stack([d0, d1, d2]) < 0.0, axis=0)[idx]
             i1 = (i0 + 1) % 3
             i2 = (i0 + 2) % 3
@@ -359,11 +341,9 @@ class SceneRenderer3D:
             dc = np.stack([d0, d1, d2], axis=1)[idx, i2]
             p_ab = _cut(va, vb, da, db)
             p_ca = _cut(vc, va, dc, da)
-            # Треугольник 1: p_ab -> vb -> vc
             new_v0.append(p_ab)
             new_v1.append(vb)
             new_v2.append(vc)
-            # Треугольник 2: p_ab -> vc -> p_ca
             new_v0.append(p_ab)
             new_v1.append(vc)
             new_v2.append(p_ca)
@@ -373,13 +353,13 @@ class SceneRenderer3D:
             new_norms.append(f_norms[idx])
             new_ts.append(f_two_sided[idx])
             new_ts.append(f_two_sided[idx])
+            if f_bias is not None:
+                new_bias.append(f_bias[idx])
+                new_bias.append(f_bias[idx])
 
-        # --- 2 вершины за камерой: остаётся 1 -> 1 треугольник ---
         m2 = behind == 2
         if np.any(m2):
             idx = np.nonzero(m2)[0]
-            # Вершина ПЕРЕД камерой (единственная с d >= 0)
-            in_front = (d0 >= 0) | (d1 >= 0) | (d2 >= 0)
             i0 = np.argmax(np.stack([d0, d1, d2]) >= 0.0, axis=0)[idx]
             va = np.stack([v0, v1, v2], axis=1)[idx, i0]
             da = np.stack([d0, d1, d2], axis=1)[idx, i0]
@@ -397,22 +377,22 @@ class SceneRenderer3D:
             new_cols.append(f_cols[idx])
             new_norms.append(f_norms[idx])
             new_ts.append(f_two_sided[idx])
-
-        # --- 3 вершины за камерой: треугольник не виден вовсе ---
-        # (эти случаи отфильтрованы до вызова)
+            if f_bias is not None:
+                new_bias.append(f_bias[idx])
 
         if not new_v0:
-            # Ни одна грань не пересекает ближнюю плоскость - возвращаем
-            # пустые массивы правильной формы (иначе vstack падает).
             empty = np.zeros((0, 3), dtype=np.float32)
-            return (
+            base_ret = (
                 empty, empty, empty,
                 np.zeros((0, 3), dtype=np.float32),
                 np.zeros((0, 3), dtype=np.float32),
                 np.zeros(0, dtype=bool),
             )
+            if f_bias is not None:
+                return base_ret + (np.zeros(0, dtype=np.float32),)
+            return base_ret
 
-        return (
+        base_ret = (
             np.vstack(new_v0),
             np.vstack(new_v1),
             np.vstack(new_v2),
@@ -420,6 +400,9 @@ class SceneRenderer3D:
             np.vstack(new_norms),
             np.concatenate(new_ts),
         )
+        if f_bias is not None:
+            return base_ret + (np.concatenate(new_bias),)
+        return base_ret
 
     @staticmethod
     def _make_surface(size: Tuple[int, int]) -> pygame.Surface:
@@ -741,6 +724,7 @@ class SceneRenderer3D:
         col_chunks: List[np.ndarray] = [self.bridge_mesh.colors]
         norm_chunks: List[np.ndarray] = [self.bridge_mesh.normals]
         ts_chunks: List[np.ndarray] = [self.bridge_mesh.two_sided]
+        bias_chunks: List[np.ndarray] = [self.bridge_mesh.depth_bias]
         v_offset = len(self.bridge_mesh.vertices)
 
         def append_transformed(mesh: Mesh3D, pos: np.ndarray, yaw: float, pitch: float = 0.0, roll: float = 0.0) -> None:
@@ -753,6 +737,7 @@ class SceneRenderer3D:
             col_chunks.append(mesh.colors)
             norm_chunks.append(tn)
             ts_chunks.append(mesh.two_sided)
+            bias_chunks.append(mesh.depth_bias)
             v_offset += len(mesh.vertices)
 
         # Add Fuel Truck + Roof Turret
@@ -782,6 +767,7 @@ class SceneRenderer3D:
         all_cols = np.vstack(col_chunks)
         all_norms = np.vstack(norm_chunks)
         all_two_sided = np.concatenate(ts_chunks)
+        all_bias = np.concatenate(bias_chunks)
 
         # Transform vertices to camera space
         cam_verts = (all_verts - cam.pos) @ rot_wc.T  # (V, 3)
@@ -790,19 +776,11 @@ class SceneRenderer3D:
         v1 = cam_verts[all_faces[:, 1]]
         v2 = cam_verts[all_faces[:, 2]]
 
-        # --- Отсечение по ближней и дальней плоскостям -------------------------
-        # Раньше грани, пересекающие ближнюю плоскость, просто отбрасывались
-        # целиком: вблизи камеры (например, когда дрон летит над полотном)
-        # пропадали куски моста. Теперь треугольник разрезается по плоскости
-        # z = near_z и получается 1 или 2 треугольника.
         near_z = 0.65
-        far_z = weather.fog_end * 1.28
-        min_z = np.minimum(np.minimum(v0[:, 2], v1[:, 2]), v2[:, 2])
+        far_z = max(weather.fog_end * 1.40, 420.0)
         max_z = np.maximum(np.maximum(v0[:, 2], v1[:, 2]), v2[:, 2])
 
-        # Дальняя плоскость: целиком за ней - выкидываем.
         far_mask = max_z < far_z
-        # Ближняя: целиком за камерой - тоже выкидываем.
         near_out_mask = max_z <= near_z
         keep_mask = far_mask & ~near_out_mask
 
@@ -813,20 +791,18 @@ class SceneRenderer3D:
             f_cols = all_cols[keep_mask]
             f_norms = all_norms[keep_mask]
             f_two_sided = all_two_sided[keep_mask]
+            f_bias = all_bias[keep_mask]
 
-            # --- Разрезание треугольников по ближней плоскости ---------------
-            # Треугольник может пересекать z = near_z: тогда он делится на
-            # части. Обрабатываем ТОЛЬКО пересекающие грани (обычно их
-            # единицы), остальные идут дальше без изменений.
             z0 = v0[:, 2]
             z1 = v1[:, 2]
             z2 = v2[:, 2]
             cross = (z0 < near_z) | (z1 < near_z) | (z2 < near_z)
             if np.any(cross):
-                cv0, cv1, cv2, ccols, cnorms, cts = self._clip_near_plane(
+                cv0, cv1, cv2, ccols, cnorms, cts, cbias = self._clip_near_plane(
                     v0[cross], v1[cross], v2[cross],
                     f_cols[cross], f_norms[cross], f_two_sided[cross],
                     near_z,
+                    f_bias=f_bias[cross],
                 )
                 plain = ~cross
                 v0 = np.vstack([v0[plain], cv0])
@@ -835,6 +811,7 @@ class SceneRenderer3D:
                 f_cols = np.vstack([f_cols[plain], ccols])
                 f_norms = np.vstack([f_norms[plain], cnorms])
                 f_two_sided = np.concatenate([f_two_sided[plain], cts])
+                f_bias = np.concatenate([f_bias[plain], cbias])
 
             # Perspective projection: sx = cx + (x / z) * focal, sy = cy - (y / z) * focal
             inv_z0 = focal / v0[:, 2]
@@ -888,26 +865,26 @@ class SceneRenderer3D:
                 f_cols = f_cols[on_screen]
                 f_norms = f_norms[on_screen]
                 f_two_sided = f_two_sided[on_screen]
+                f_bias = f_bias[on_screen]
                 fn = fn[on_screen]
                 facing = facing[on_screen]
 
-                # Painter's depth sort: back-to-front по САМОЙ ДАЛЬНЕЙ вершине.
-                # Раньше сортировка шла по центроиду: у больших граней (полотно
-                # моста, вода, арки) центроид оказывался ближе, чем стоящие на них
-                # объекты, и они «проваливались» под грани - ещё одна причина
-                # исчезающих кусков графики.
                 d0 = np.sum(v0_c * v0_c, axis=1)
                 d1 = np.sum(v1_c * v1_c, axis=1)
                 d2 = np.sum(v2_c * v2_c, axis=1)
-                depths = np.maximum(np.maximum(d0, d1), d2)
+                depths_raw = np.maximum(np.maximum(d0, d1), d2)
+                depths = depths_raw * f_bias
                 order = np.argsort(depths)[::-1]
 
                 sx0, sy0 = sx0[order].astype(np.int32), sy0[order].astype(np.int32)
                 sx1, sy1 = sx1[order].astype(np.int32), sy1[order].astype(np.int32)
                 sx2, sy2 = sx2[order].astype(np.int32), sy2[order].astype(np.int32)
-                dist_arr = np.sqrt(depths[order])
+                dist_arr = np.sqrt(depths_raw[order])
                 f_cols = f_cols[order]
                 f_norms = f_norms[order]
+                f_two_sided = f_two_sided[order]
+                fn = fn[order]
+                facing = facing[order]
 
                 # Directional sun shading + weather ambient + distance fog
                 #
@@ -1315,9 +1292,10 @@ class SceneRenderer3D:
             )
 
         # --- Ночные огни города на противоположном берегу ------------------------
-        # Огоньки сидят на линии горизонта (берег) и слегка поднимаются вверх.
+        # Рисуются только в сумерках/ночью, чтобы на светлом закатном небе не
+        # появлялись тёмные пиксельные точки.
         city = float(getattr(weather, "city_lights", 0.0))
-        if city > 0.01:
+        if city > 0.01 and float(weather.ambient_light) < 0.65:
             city_az = 2.55
             base_p = self._project_dir(city_az, 0.0, rot_wc, focal, cx, cy)
             if base_p is not None:
@@ -1355,12 +1333,45 @@ class SceneRenderer3D:
                 pulse_r = int(clamp((28.0 / p_ew[2]) * focal * (0.6 + 0.4 * math.sin(sim.sim_time * 12.0)), 8, 280))
                 pygame.draw.circle(surface, (80, 215, 255), (p_ew[0], p_ew[1]), pulse_r, 2)
 
-        # Bullet / Pellet Tracers
+        # Short Muzzle Flash Streaks
         for tr in sim.tracers:
             p0 = proj(tr.start)
             p1 = proj(tr.end)
             if p0 is not None and p1 is not None:
                 pygame.draw.line(surface, tr.color, (p0[0], p0[1]), (p1[0], p1[1]), 2)
+
+        # Physical Ballistic Projectiles in flight (3D trajectories with gravity & drag!)
+        proj_list = getattr(sim, "projectiles", [])
+        net_proj = getattr(sim, "net_proj_lines", [])
+        if proj_list:
+            for pr in proj_list:
+                tail = pr.pos - pr.vel * 0.022
+                p0 = proj((float(tail[0]), float(tail[1]), float(tail[2])))
+                p1 = proj((float(pr.pos[0]), float(pr.pos[1]), float(pr.pos[2])))
+                if p1 is not None:
+                    if pr.kind == "bomblet":
+                        r_px = int(clamp((0.45 / p1[2]) * focal, 3, 14))
+                        pygame.draw.circle(surface, (255, 110, 45), (p1[0], p1[1]), r_px)
+                        pygame.draw.circle(surface, (255, 235, 130), (p1[0], p1[1]), max(2, r_px // 2))
+                    else:
+                        if p0 is not None:
+                            pygame.draw.line(surface, pr.color, (p0[0], p0[1]), (p1[0], p1[1]), 2)
+                        r_px = int(clamp((0.28 / p1[2]) * focal, 2, 7))
+                        pygame.draw.circle(surface, (255, 245, 195), (p1[0], p1[1]), r_px)
+        elif net_proj:
+            for item in net_proj:
+                p0 = proj(item.start)
+                p1 = proj(item.end)
+                if p1 is not None:
+                    if getattr(item, "kind", "turret") == "bomblet":
+                        r_px = int(clamp((0.45 / p1[2]) * focal, 3, 14))
+                        pygame.draw.circle(surface, (255, 110, 45), (p1[0], p1[1]), r_px)
+                        pygame.draw.circle(surface, (255, 235, 130), (p1[0], p1[1]), max(2, r_px // 2))
+                    else:
+                        if p0 is not None:
+                            pygame.draw.line(surface, item.color, (p0[0], p0[1]), (p1[0], p1[1]), 2)
+                        r_px = int(clamp((0.28 / p1[2]) * focal, 2, 7))
+                        pygame.draw.circle(surface, (255, 245, 195), (p1[0], p1[1]), r_px)
 
         # Aerosol Smoke Clouds
         for sm in sim.smokes:
@@ -1441,11 +1452,14 @@ class SceneRenderer3D:
         has_thermal = sim.drone_mod == "airburst_frag"
         dist_m = float(np.linalg.norm(sim.truck_pos - sim.drone_pos))
         # Hide marker inside smoke unless operator picked Thermal/Airburst modifier!
+        # Dense TDA thermal smoke (`flamethrower_smoke`) blocks even thermal sight > 35m!
         in_smoke = any(
             float(np.linalg.norm(sim.truck_pos - np.array(sm.pos, dtype=np.float32))) < sm.radius * 1.15
             for sm in sim.smokes
         )
-        if target_proj is not None and (has_thermal or (not in_smoke and jam < 0.72)):
+        tda_blind = in_smoke and sim.truck_mod == "flamethrower_smoke" and dist_m > 35.0
+        show_box = (not tda_blind) and (has_thermal or (not in_smoke and jam < 0.72))
+        if target_proj is not None and show_box:
             tx, ty, _ = target_proj
             if 0 <= tx <= w and 0 <= ty <= h:
                 box_col = (255, 220, 55) if has_thermal else (255, 85, 65)
@@ -1464,18 +1478,20 @@ class SceneRenderer3D:
             lbl = self.font_sm.render(f"v БЕНЗОВОЗ ({int(dist_m)}м) v", True, (255, 140, 60))
             surface.blit(lbl, (arrow_x - lbl.get_width() // 2, 52))
 
-        # 4. Left & Right FPV Telemetry (Speed, Altitude, Battery, Lives, Active Perk)
+        # 4. Left & Right FPV Telemetry (Speed, Altitude, Throttle, Battery, Lives, Active Perk)
         spd_kmh = int(float(np.linalg.norm(sim.drone_vel)) * 3.6)
         alt_m = max(0, int(float(sim.drone_pos[1]) - ROAD_DECK_Y))
+        thr_pct = int(clamp(float(getattr(sim, "drone_throttle_pct", 35.0)), 0, 100))
+        roll_deg = int(math.degrees(sim.drone_roll))
         bat_pct = int(clamp((sim.drone_battery / max(sim.drone_max_battery, 1.0)) * 100.0, 0, 100))
         bat_col = osd_green if bat_pct > 30 else (255, 75, 65)
 
-        panel = pygame.Surface((330, 178), pygame.SRCALPHA)
+        panel = pygame.Surface((360, 182), pygame.SRCALPHA)
         panel.fill((10, 16, 22, 175))
-        surface.blit(panel, (16, h - 194))
+        surface.blit(panel, (16, h - 198))
 
-        mode_txt = "АКРО (ручное удержание)" if getattr(sim, "drone_acro", False) else "СТАБИЛИЗАЦИЯ (самоуровень)"
-        mode_col = (255, 165, 60) if getattr(sim, "drone_acro", False) else (120, 220, 255)
+        mode_txt = "АКРО (ручной тангаж/крен) [X]" if getattr(sim, "drone_acro", True) else "УГОЛ (ассист уровня) [X]"
+        mode_col = (255, 165, 60) if getattr(sim, "drone_acro", True) else (120, 220, 255)
         warhead_cd = float(getattr(sim, "drone_detonate_cd", 0.0))
         if warhead_cd > 0.01:
             war_txt = f"БЧ: ПЕРЕЗАРЯДКА {warhead_cd:.1f}с"
@@ -1484,7 +1500,7 @@ class SceneRenderer3D:
             war_txt = "БЧ: ГОТОВА К ПОДРЫВУ (ПКМ)"
             war_col = (120, 255, 170)
         lines = [
-            (f"СКОРОСТЬ: {spd_kmh} км/ч | ВЫС: {alt_m} м", osd_green),
+            (f"СКОР: {spd_kmh} км/ч | ВЫС: {alt_m}м | ГАЗ: {thr_pct}% | КРЕН: {roll_deg:+d}°", osd_green),
             (f"БАТАРЕЯ 6S: {bat_pct}%  ({sim.drone_battery:.0f}с)", bat_col),
             (f"ЦЕЛОСТНОСТЬ РАМЫ: {int(sim.drone_hp)}/{int(sim.drone_max_hp)}", (190, 235, 255)),
             (f"ЗАПАС БОРТОВ FPV: {'[+] ' * sim.drone_lives_left}", (255, 205, 80)),
@@ -1493,7 +1509,7 @@ class SceneRenderer3D:
             (war_txt, war_col),
         ]
         for i, (txt, col) in enumerate(lines):
-            surface.blit(self.font_xs.render(txt, True, col), (26, h - 186 + i * 24))
+            surface.blit(self.font_xs.render(txt, True, col), (26, h - 190 + i * 24))
 
         if not sim.drone_alive and sim.drone_lives_left > 0:
             msg = self.font_lg.render(f"ЗАПУСК НОВОГО FPV ЧЕРЕЗ {sim.drone_respawn_timer:.1f}с...", True, (255, 200, 65))
@@ -1535,33 +1551,57 @@ class SceneRenderer3D:
                 lk = self.font_xs.render("ЗАХВАТ ЦЕЛИ!", True, (255, 80, 70))
                 surface.blit(lk, (cx - lk.get_width() // 2, cy - 70))
 
-        # 2. Drone Threat Indicator / Lead Radar (enhanced if Buckshot+Radar perk picked!)
-        has_radar = sim.truck_mod == "buckshot_radar"
+        # 2. Drone Threat Indicator & Ballistic Lead Pip!
+        has_radar = sim.truck_mod in ("buckshot_radar", "ballistic_computer")
+        is_stealth = sim.drone_mod == "stealth_matte"
+        radar_mult = 0.55 if is_stealth else 1.0
+        box_range = (240.0 if has_radar else 135.0) * radar_mult
+        lead_range = (260.0 if sim.truck_mod == "ballistic_computer" else (210.0 if has_radar else 130.0)) * radar_mult
+
         if sim.drone_alive:
             dist_d = float(np.linalg.norm(sim.drone_pos - sim.truck_pos))
             if drone_proj is not None and 0 <= drone_proj[0] <= w and 0 <= drone_proj[1] <= h:
                 dx_s, dy_s, _ = drone_proj
-                if has_radar or dist_d < 165.0:
+                if dist_d <= box_range:
                     r_col = (255, 65, 65) if dist_d < 75.0 else (255, 190, 60)
                     pygame.draw.circle(surface, r_col, (dx_s, dy_s), 18, 2)
-                    tag = f"FPV {int(dist_d)}м" if has_radar or dist_d < 110.0 else "УГРОЗА!"
+                    tag = f"FPV {int(dist_d)}м" if (has_radar or dist_d < 105.0) else "УГРОЗА!"
                     lbl = self.font_xs.render(tag, True, r_col)
                     surface.blit(lbl, (dx_s - lbl.get_width() // 2, dy_s - 30))
-            else:
-                # Directional threat warning arrow
-                desired_yaw = math.atan2(
-                    float(sim.drone_pos[0] - sim.truck_pos[0]),
-                    float(sim.drone_pos[2] - sim.truck_pos[2]),
-                )
-                rel = (desired_yaw - sim.turret_yaw + math.pi) % (2 * math.pi) - math.pi
-                side_txt = "<< FPV СЛЕВА" if rel < 0 else "FPV СПРАВА >>"
-                warn = self.font_sm.render(f"[!] {side_txt} ({int(dist_d)}м)", True, (255, 95, 75))
-                surface.blit(warn, (cx - warn.get_width() // 2, 54))
 
-        # 3. Left Panel: Truck Cistern HP, Speed, Bridge Progress
-        panel_l = pygame.Surface((336, 134), pygame.SRCALPHA)
+                # Ballistic Lead Pip (accounts for gravity drop, drag, wind, and velocity!)
+                if dist_d <= lead_range and hasattr(sim, "compute_ballistic_lead_pos"):
+                    lead_world = sim.compute_ballistic_lead_pos()
+                    cam = self.make_truck_camera(sim)
+                    rot_wc = euler_to_matrix(cam.yaw, cam.pitch, cam.roll).T
+                    lv = (lead_world - cam.pos) @ rot_wc.T
+                    if lv[2] > 0.8:
+                        focal = (w * 0.5) / math.tan(math.radians(cam.fov_deg) * 0.5)
+                        lx = int(w * 0.5 + (lv[0] / lv[2]) * focal)
+                        ly = int(h * 0.5 - (lv[1] / lv[2]) * focal)
+                        if -40 <= lx <= w + 40 and -40 <= ly <= h + 40:
+                            pip_col = (80, 255, 175) if sim.truck_mod == "ballistic_computer" else (120, 235, 255)
+                            if dist_d <= box_range:
+                                pygame.draw.line(surface, (90, 190, 210), (dx_s, dy_s), (lx, ly), 1)
+                            pts = [(lx, ly - 8), (lx + 8, ly), (lx, ly + 8), (lx - 8, ly)]
+                            pygame.draw.polygon(surface, pip_col, pts, 2)
+                            pygame.draw.circle(surface, pip_col, (lx, ly), 2)
+            else:
+                # Directional threat warning arrow (suppressed further out vs Stealth drone)
+                if not is_stealth or dist_d < 95.0:
+                    desired_yaw = math.atan2(
+                        float(sim.drone_pos[0] - sim.truck_pos[0]),
+                        float(sim.drone_pos[2] - sim.truck_pos[2]),
+                    )
+                    rel = (desired_yaw - sim.turret_yaw + math.pi) % (2 * math.pi) - math.pi
+                    side_txt = "<< FPV СЛЕВА" if rel < 0 else "FPV СПРАВА >>"
+                    warn = self.font_sm.render(f"[!] {side_txt} ({int(dist_d)}м)", True, (255, 95, 75))
+                    surface.blit(warn, (cx - warn.get_width() // 2, 54))
+
+        # 3. Left Panel: Truck Cistern HP, Speed, Bridge Progress, Defensive Perks
+        panel_l = pygame.Surface((386, 154), pygame.SRCALPHA)
         panel_l.fill((12, 16, 24, 180))
-        surface.blit(panel_l, (16, h - 150))
+        surface.blit(panel_l, (16, h - 170))
 
         hp_ratio = clamp(sim.truck_hp / max(sim.truck_max_hp, 1.0), 0.0, 1.0)
         hp_col = (75, 230, 115) if hp_ratio > 0.45 else (255, 80, 65)
@@ -1574,19 +1614,20 @@ class SceneRenderer3D:
             )
         )
 
-        # Easter-egg cabin sticker from `черешня.jpg` in corner of dashboard!
         if self.easter_egg_thumb is not None:
-            surface.blit(self.easter_egg_thumb, (278, h - 142))
+            surface.blit(self.easter_egg_thumb, (334, h - 162))
 
+        era_str = " | ДЗ: ГОТОВА" if getattr(sim, "truck_reactive_ready", False) else ""
         l_lines = [
-            (f"БРОНЯ ЦИСТЕРНЫ: {int(sim.truck_hp)}/{int(sim.truck_max_hp)} HP", hp_col),
+            (f"БРОНЯ ЦИСТЕРНЫ: {int(sim.truck_hp)}/{int(sim.truck_max_hp)} HP{era_str}", hp_col),
             (f"СКОРОСТЬ ТЯГАЧА: {spd_kmh} км/ч", (235, 240, 248)),
             (f"МАРШРУТ ПО МОСТУ: {prog_pct}% до КПП", (110, 215, 255)),
             (f"ДРОНОВ У ВРАГА: {sim.drone_lives_left}", (255, 195, 90)),
             (f"МОД: {TRUCK_MOD_BY_ID[sim.truck_mod].name_ru}", (185, 215, 255)),
+            ("УПРЕЖДЕНИЕ: голубой ромб (учёт баллистики)", (120, 235, 255)),
         ]
         for i, (txt, col) in enumerate(l_lines):
-            surface.blit(self.font_xs.render(txt, True, col), (26, h - 142 + i * 24))
+            surface.blit(self.font_xs.render(txt, True, col), (26, h - 162 + i * 24))
 
         # 4. Right Panel: Anti-FPV Weapons & Countermeasures Status
         panel_r = pygame.Surface((295, 134), pygame.SRCALPHA)
@@ -1658,91 +1699,84 @@ class SceneRenderer3D:
 
         if sim.phase == "MODIFIER_DRAFT":
             dim = pygame.Surface((w, h), pygame.SRCALPHA)
-            dim.fill((8, 12, 22, 205))
+            dim.fill((8, 12, 22, 212))
             surface.blit(dim, (0, 0))
 
             title = self.font_lg.render(
-                f"РАУНД {sim.round_number} — СВОДКА ПОГОДЫ И ВЫБОР МОДИФИКАТОРА",
+                f"РАУНД {sim.round_number} — ПОГОДА И СЛУЧАЙНЫЕ МОДИФИКАТОРЫ",
                 True,
                 (255, 218, 95),
             )
-            surface.blit(title, (cx - title.get_width() // 2, 52))
+            surface.blit(title, (cx - title.get_width() // 2, 54))
 
             w_box = self.font_md.render(f"Погода раунда: {sim.weather.name_ru}", True, (115, 215, 255))
             w_desc = self.font_sm.render(sim.weather.description_ru, True, (210, 220, 235))
-            surface.blit(w_box, (cx - w_box.get_width() // 2, 98))
-            surface.blit(w_desc, (cx - w_desc.get_width() // 2, 128))
+            surface.blit(w_box, (cx - w_box.get_width() // 2, 108))
+            surface.blit(w_desc, (cx - w_desc.get_width() // 2, 140))
 
-            from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS
-            mods = DRONE_MODIFIERS if my_role == "drone" else TRUCK_MODIFIERS
-            selected_id = sim.drone_mod if my_role == "drone" else sim.truck_mod
+            my_mod = DRONE_MOD_BY_ID.get(sim.drone_mod) if my_role == "drone" else TRUCK_MOD_BY_ID.get(sim.truck_mod)
+            opp_mod = TRUCK_MOD_BY_ID.get(sim.truck_mod) if my_role == "drone" else DRONE_MOD_BY_ID.get(sim.drone_mod)
             am_ready = sim.drone_draft_ready if my_role == "drone" else sim.truck_draft_ready
 
-            role_hdr = (
-                "Выберите оснащение FPV Дрона (клавиши 1–5 или крестовина геймпада):"
+            my_role_hdr = (
+                "ВАШ СЛУЧАЙНЫЙ МОДИФИКАТОР (FPV ДРОН):"
                 if my_role == "drone"
-                else "Выберите модификацию Бензовоза и ПВО (клавиши 1–5 или крестовина геймпада):"
+                else "ВАШ СЛУЧАЙНЫЙ МОДИФИКАТОР (БЕНЗОВОЗ ПВО):"
             )
-            hdr_s = self.font_sm.render(role_hdr, True, (240, 245, 250))
-            surface.blit(hdr_s, (cx - hdr_s.get_width() // 2, 168))
+            opp_role_hdr = (
+                "СЛУЧАЙНЫЙ МОДИФИКАТОР ПРОТИВНИКА (БЕНЗОВОЗ ПВО):"
+                if my_role == "drone"
+                else "СЛУЧАЙНЫЙ МОДИФИКАТОР ПРОТИВНИКА (FPV ДРОН):"
+            )
 
-            # Карточка шире и выше, чем раньше: длинные названия и описания
-            # модификаторов больше не вылезают за её края.
-            card_w = min(900, w - 60)
+            card_w = min(980, w - 40)
             card_x = cx - card_w // 2
-            card_h = 70
-            card_step = 78
-            for idx, m in enumerate(mods):
-                cy_card = 196 + idx * card_step
-                is_sel = m.id == selected_id
-                bg = (36, 78, 122, 235) if is_sel else (22, 30, 44, 215)
-                border = (255, 212, 75) if is_sel else (70, 88, 112)
 
-                card = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
-                card.fill(bg)
-                surface.blit(card, (card_x, cy_card))
-                pygame.draw.rect(surface, border, (card_x, cy_card, card_w, card_h), 2)
+            # Card 1: Player's randomly issued modifier
+            c1_y, c1_h = 198, 134
+            c1 = pygame.Surface((card_w, c1_h), pygame.SRCALPHA)
+            c1.fill((30, 70, 112, 238))
+            surface.blit(c1, (card_x, c1_y))
+            pygame.draw.rect(surface, (255, 214, 78), (card_x, c1_y, card_w, c1_h), 3)
+            surface.blit(self.font_sm.render(my_role_hdr, True, (140, 225, 255)), (card_x + 22, c1_y + 14))
+            if my_mod is not None:
+                surface.blit(self.font_lg.render(my_mod.name_ru, True, (255, 255, 255)), (card_x + 22, c1_y + 42))
+                surface.blit(self.font_sm.render(my_mod.short_ru, True, (255, 212, 110)), (card_x + 22, c1_y + 82))
+                surface.blit(self.font_xs.render(my_mod.desc_ru, True, (215, 228, 244)), (card_x + 22, c1_y + 108))
 
-                # Строка 1: имя модификатора (крупный шрифт).
-                t1 = self.font_md.render(f"[{m.key_hint}] {m.name_ru}", True, (255, 255, 255))
-                surface.blit(t1, (card_x + 16, cy_card + 4))
-                # Строка 2: краткий эффект (справа от имени не влезает -
-                # поэтому эффект идёт отдельной строкой слева).
-                t_short = self.font_xs.render(m.short_ru, True, (255, 210, 110))
-                surface.blit(t_short, (card_x + 16, cy_card + 33))
-                # Строка 3: полное описание.
-                t2 = self.font_xs.render(m.desc_ru, True, (195, 210, 228))
-                surface.blit(t2, (card_x + 16, cy_card + 50))
+            # Card 2: Opponent's randomly issued modifier
+            c2_y, c2_h = 356, 118
+            c2 = pygame.Surface((card_w, c2_h), pygame.SRCALPHA)
+            c2.fill((28, 34, 48, 225))
+            surface.blit(c2, (card_x, c2_y))
+            pygame.draw.rect(surface, (215, 115, 85), (card_x, c2_y, card_w, c2_h), 2)
+            surface.blit(self.font_sm.render(opp_role_hdr, True, (255, 165, 120)), (card_x + 22, c2_y + 12))
+            if opp_mod is not None:
+                surface.blit(self.font_md.render(opp_mod.name_ru, True, (255, 238, 220)), (card_x + 22, c2_y + 40))
+                surface.blit(self.font_sm.render(opp_mod.short_ru, True, (240, 190, 125)), (card_x + 22, c2_y + 70))
+                surface.blit(self.font_xs.render(opp_mod.desc_ru, True, (195, 205, 222)), (card_x + 22, c2_y + 94))
 
-            # --- Модификатор противника (известен сразу - играем встречно) ---
-            if my_role == "drone":
-                opp_mod = TRUCK_MOD_BY_ID.get(sim.truck_mod)
-                opp_role_txt = "Бензовоз выбрал:"
-            else:
-                opp_mod = DRONE_MOD_BY_ID.get(sim.drone_mod)
-                opp_role_txt = "Оператор FPV выбрал:"
-            opp_box_w = min(900, w - 60)
-            opp_y = 596
-            opp_panel = pygame.Surface((opp_box_w, 34), pygame.SRCALPHA)
-            opp_panel.fill((16, 24, 36, 215))
-            surface.blit(opp_panel, (cx - opp_box_w // 2, opp_y))
-            pygame.draw.rect(surface, (86, 118, 150), (cx - opp_box_w // 2, opp_y, opp_box_w, 34), 1)
-            opp_txt = f"{opp_role_txt} {opp_mod.name_ru if opp_mod else '—'}"
-            opp_s = self.font_sm.render(opp_txt, True, (255, 175, 110))
-            surface.blit(opp_s, (cx - opp_s.get_width() // 2, opp_y + 9))
+            # Tactical note for updated physics/ballistics
+            tip = (
+                "Полёт FPV в режиме АКРО по умолчанию: держите газ [W] и крен [A/D/мышь]; [X] — угол-ассист."
+                if my_role == "drone"
+                else "Баллистика 3D: берите упреждение по голубому ромбу на экране; [ПКМ] — картечь вблизи, [E] — РЭБ."
+            )
+            tip_s = self.font_sm.render(tip, True, (175, 235, 195))
+            surface.blit(tip_s, (cx - tip_s.get_width() // 2, 502))
 
             rdy_txt = (
                 "[OK] ВЫ ГОТОВЫ! Ожидание второго игрока..."
                 if am_ready
-                else f"Нажмите [ENTER / R / Кнопка A] для готовности (автостарт: {int(sim.phase_timer)}с)"
+                else f"Нажмите [ENTER / R / Кнопка A] для начала вылета (автостарт: {int(sim.phase_timer)}с)"
             )
             rdy_col = (95, 245, 130) if am_ready else (255, 210, 90)
             rdy_s = self.font_md.render(rdy_txt, True, rdy_col)
-            surface.blit(rdy_s, (cx - rdy_s.get_width() // 2, 640))
+            surface.blit(rdy_s, (cx - rdy_s.get_width() // 2, 558))
 
             if net_status:
                 ns = self.font_sm.render(net_status, True, (155, 205, 255))
-                surface.blit(ns, (cx - ns.get_width() // 2, 674))
+                surface.blit(ns, (cx - ns.get_width() // 2, 604))
 
         elif sim.phase == "ROUND_END":
             banner = pygame.Surface((min(780, w - 40), 170), pygame.SRCALPHA)

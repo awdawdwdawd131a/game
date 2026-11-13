@@ -2,18 +2,20 @@
 Built-in Verification & Diagnostic Mode ("Проверочный режим"):
 Tests all subsystems automatically on any PC (either inside the desktop GUI or via `--self-test` CLI):
 1. Repository integrity check (ensures `черешня.jpg` is untouched and valid)
-2. 3D Bridge, Fuel Truck & FPV Drone geometry + perspective renderer test (renders real frames!)
+2. 3D Bridge, Fuel Truck & FPV Drone geometry + perspective renderer + anti-flicker bridge checks
 3. Weather rotation check across 6 consecutive rounds (verifies distinct weather every round + wind/grip physics)
-4. Modifiers verification for BOTH roles (shaped charge, fiber optic EW immunity, cope cage, twin turret, V12, etc.)
-5. Anti-FPV combat verification (proves the Fuel Truck gunner can shoot down an incoming FPV drone!)
+4. Expanded 10+10 random modifiers verification for BOTH roles (shuffled bags, EW immunity, ERA, cluster, etc.)
+5. Anti-FPV ballistic combat verification (proves Fuel Truck shoots down incoming FPV with real 3D projectiles!)
 6. FPV Direct-Hit destruction verification (proves FPV warhead destroys the Fuel Truck!)
-7. Real TCP Socket 1v1 Multiplayer loopback test (spawns `GameServer` + 2 `GameClient`s on separate sockets,
-   exchanges inputs & snapshots, measures RTT ping, verifies sync!)
-8. Joystick / Gamepad subsystem initialization & mapping check.
+7. Real TCP Socket 1v1 Multiplayer loopback test (spawns `GameServer` + 2 `GameClient`s on separate sockets)
+8. Joystick / Gamepad subsystem initialization & mapping check
+9. Stand-off airburst, turret tracking lock & 3D ballistics / Acro quadcopter physics checks
+10. Near-plane clipping topology + rebindable control profile JSON persistence
 """
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -23,9 +25,8 @@ import numpy as np
 import pygame
 
 from .assets import find_file
-from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS, WEATHER_PRESETS
+from .config import DRONE_MODIFIERS, ROAD_DECK_Y, ROAD_HALF_WIDTH, TRUCK_MODIFIERS, WEATHER_PRESETS
 from .controls import InputController, JoystickProfile, apply_deadzone
-from .math3d import forward_from_angles
 from .network import GameClient, GameServer
 from .physics import DroneInput, TruckInput, WorldSimulation
 from .renderer import SceneRenderer3D
@@ -59,7 +60,6 @@ def run_verification_suite(
 
     # 1. Check `черешня.jpg` preserved
     def check_chereshnya() -> str:
-        # Ищем и рядом с .exe, и внутри собранного бандла (PyInstaller _MEIPASS)
         p = find_file("черешня.jpg", repo_root)
         assert p is not None, "Файл черешня.jpg не найден!"
         sz = os.path.getsize(p)
@@ -68,7 +68,7 @@ def run_verification_suite(
 
     record("1. Сохранность картинки черешня.jpg в репозитории", check_chereshnya)
 
-    # 2. Check 3D Mesh generation & Software/SDL 3D Renderer (both FPV & Truck cameras)
+    # 2. Check 3D Mesh generation, anti-flicker geometry, & Software 3D Renderer
     def check_3d_renderer() -> str:
         if not pygame.get_init():
             pygame.init()
@@ -76,6 +76,11 @@ def run_verification_suite(
         sim.begin_active_round()
         renderer = SceneRenderer3D(960, 540, sim.barriers, repo_root)
         surf = pygame.Surface((960, 540))
+
+        # Verify depth_bias present on road decals and non-zero clean triangle count
+        bm = renderer.bridge_mesh
+        assert np.any(bm.depth_bias < 0.9995), "Ожидался depth_bias < 1.0 для дорожной разметки!"
+        assert bm.depth_bias.shape[0] == bm.faces.shape[0]
 
         # Render FPV view
         cam_d = renderer.make_drone_camera(sim)
@@ -94,11 +99,11 @@ def run_verification_suite(
         if save_screenshots_dir:
             pygame.image.save(surf, os.path.join(save_screenshots_dir, "verify_truck_view.png"))
 
-        n_tris = len(renderer.bridge_mesh.faces) + len(renderer.truck_meshes[True].faces) + len(renderer.drone_meshes[True].faces)
+        n_tris = len(bm.faces) + len(renderer.truck_meshes[True].faces) + len(renderer.drone_meshes[True].faces)
         assert n_tris > 400, "Слишком мало 3D полигонов!"
-        return f"Отрендерены 3D сцены FPV и Бензовоза ({n_tris} треугольников, арки + мост + HUD)"
+        return f"Отрендерены 3D сцены FPV и Бензовоза ({n_tris} треугольников, без пересечений моста)"
 
-    record("2. 3D-движок Крымского моста, камер и HUD", check_3d_renderer)
+    record("2. 3D-движок Крымского моста, камер и анти-мерцание", check_3d_renderer)
 
     # 3. Check Weather Rotation across rounds
     def check_weather_rotation() -> str:
@@ -115,10 +120,32 @@ def run_verification_suite(
 
     record("3. Смена погоды каждый раунд (6 погодных условий)", check_weather_rotation)
 
-    # 4. Check Modifiers for BOTH FPV Drone & Fuel Truck
+    # 4. Check Expanded 10+10 Random Modifiers for BOTH roles
     def check_modifiers() -> str:
-        assert len(DRONE_MODIFIERS) >= 5 and len(TRUCK_MODIFIERS) >= 5
+        assert len(DRONE_MODIFIERS) >= 10 and len(TRUCK_MODIFIERS) >= 10, (
+            f"Ожидалось >= 10 модов на сторону, получено {len(DRONE_MODIFIERS)} + {len(TRUCK_MODIFIERS)}"
+        )
         sim = WorldSimulation(seed=55)
+
+        # Verify random shuffled-bag issuance draws every modifier without immediate repeats
+        seen_d = [sim.drone_mod]
+        seen_t = [sim.truck_mod]
+        for _ in range(len(DRONE_MODIFIERS) - 1):
+            sim.round_number += 1
+            sim.start_modifier_draft(advance_weather=True)
+            assert sim.drone_mod != seen_d[-1], "Модификатор дрона повторился два раунда подряд!"
+            assert sim.truck_mod != seen_t[-1], "Модификатор бензовоза повторился два раунда подряд!"
+            seen_d.append(sim.drone_mod)
+            seen_t.append(sim.truck_mod)
+        assert len(set(seen_d)) == len(DRONE_MODIFIERS), "Не все моды дрона выпали в мешке!"
+        assert len(set(seen_t)) == len(TRUCK_MODIFIERS), "Не все моды бензовоза выпали в мешке!"
+
+        # Verify manual pick_modifier input cannot override server/random issuance
+        before_d = sim.drone_mod
+        before_t = sim.truck_mod
+        sim.step(1.0 / 60.0, DroneInput(pick_modifier="kevlar_frame"), TruckInput(pick_modifier="v12_biturbo"))
+        assert sim.drone_mod == before_d and sim.truck_mod == before_t, "Модификаторы не должны выбираться вручную!"
+
         # Fiber optic immunity to EW jammer
         sim.drone_mod = "fiber_optic"
         sim.truck_mod = "ew_kupol"
@@ -133,49 +160,60 @@ def run_verification_suite(
         sim.step(1.0 / 60.0, DroneInput(), TruckInput())
         assert sim.drone_jam_level > 0.3, "Обычный FPV должен получать помехи от РЭБ!"
 
+        # Reactive armor reduces first warhead impact
+        sim.drone_mod = "shaped_charge"
+        sim.truck_mod = "reactive_armor"
+        sim.begin_active_round()
+        assert sim.truck_reactive_ready, "ДЗ «Контакт» должна быть взведена в начале раунда!"
+        hp_era_before = sim.truck_hp
+        sim.drone_pos[:] = sim.truck_pos + np.array([0.0, 2.2, 0.0], dtype=np.float32)
+        sim.step(1.0 / 60.0, DroneInput(detonate=True), TruckInput())
+        assert not sim.truck_reactive_ready and sim.truck_hp > 0.0, "ДЗ должна сработать и спасти цистерну!"
+        assert (hp_era_before - sim.truck_hp) < 65.0
+
         # Kevlar frame extra drone life
         sim.drone_mod = "kevlar_frame"
         sim.begin_active_round()
         assert sim.drone_lives_left == 4 and sim.drone_max_hp > 55.0
-        return f"Проверены {len(DRONE_MODIFIERS)} модов FPV и {len(TRUCK_MODIFIERS)} модов Бензовоза (вкл. РЭБ vs Оптоволокно)"
+        return (
+            f"Проверены {len(DRONE_MODIFIERS)} модов FPV + {len(TRUCK_MODIFIERS)} модов Бензовоза "
+            "(рандом без повторов, РЭБ, ДЗ, кевлар)"
+        )
 
-    record("4. Система модификаторов для обоих игроков", check_modifiers)
+    record("4. Случайные модификаторы (10+10) для обоих игроков", check_modifiers)
 
-    # 5. Check Fuel Truck Shooting Down Incoming FPV Drone
+    # 5. Check Fuel Truck Shooting Down Incoming FPV Drone with 3D Ballistics
     def check_shoot_down_fpv() -> str:
         sim = WorldSimulation(seed=99)
         sim.truck_mod = "twin_zu_turret"
         sim.begin_active_round()
         initial_lives = sim.drone_lives_left
 
-        # Place FPV 30m behind/above the truck and aim roof turret directly at it
         muzzle = sim.get_turret_muzzle_pos()
         sim.drone_pos[:] = muzzle + np.array([0.0, 9.0, -30.0], dtype=np.float32)
-        rel = sim.drone_pos - muzzle
-        horiz = float(np.hypot(rel[0], rel[2]))
-        sim.turret_yaw = float(np.arctan2(rel[0], rel[2]))
-        sim.turret_pitch = float(np.arctan2(-rel[1], horiz))
 
         shot_frames = 0
         for _ in range(240):
-            # The gunner keeps tracking the drone while the truck is driving
+            lead = sim.compute_ballistic_lead_pos()
+            if lead is None:
+                lead = sim.drone_pos
             mz = sim.get_turret_muzzle_pos()
-            rel = sim.drone_pos - mz
+            rel = lead - mz
             hz = float(np.hypot(rel[0], rel[2]))
             sim.turret_yaw = float(np.arctan2(rel[0], rel[2]))
             sim.turret_pitch = float(np.arctan2(-rel[1], hz))
-            sim.step(1.0 / 60.0, DroneInput(), TruckInput(fire_turret=True, fire_shotgun=True))
+            sim.step(1.0 / 60.0, DroneInput(throttle=0.45), TruckInput(fire_turret=True, fire_shotgun=True))
             if not sim.drone_alive:
                 break
             shot_frames += 1
 
         assert not sim.drone_alive and sim.drone_lives_left == initial_lives - 1, "Стрелок бензовоза не смог сбить FPV!"
         return (
-            f"Бензовоз успешно сбил атакующий FPV из зенитной турели и дробовика "
+            f"Бензовоз сбил FPV с баллистическим упреждением "
             f"(за {shot_frames / 60.0:.1f}с огня, дальность 30м)"
         )
 
-    record("5. Механика сбития FPV дрона водителем бензовоза", check_shoot_down_fpv)
+    record("5. Механика сбития FPV дрона 3D-баллистикой ПВО", check_shoot_down_fpv)
 
     # 6. Check FPV Destroying the Fuel Truck
     def check_fpv_destroys_truck() -> str:
@@ -184,9 +222,8 @@ def run_verification_suite(
         sim.truck_mod = "v12_biturbo"
         sim.begin_active_round()
         sim.truck_hp = 75.0
-        # Put FPV right onto fuel cistern for shaped-charge strike
         sim.drone_pos[:] = sim.truck_pos + np.array([0.0, 2.2, -1.0], dtype=np.float32)
-        sim.step(1.0 / 60.0, DroneInput(detonate=True), TruckInput())
+        sim.step(1.0 / 60.0, DroneInput(), TruckInput())
         assert sim.truck_hp <= 0.0 and sim.phase == "ROUND_END" and sim.round_winner == "drone", (
             f"Ожидалось уничтожение бензовоза, но truck_hp={sim.truck_hp}, phase={sim.phase}"
         )
@@ -206,9 +243,9 @@ def run_verification_suite(
             assert ok1 and c_drone.role == "drone", f"Клиент 1 ошибка: {c_drone.error_msg}"
             assert ok2 and c_truck.role == "truck", f"Клиент 2 ошибка: {c_truck.error_msg}"
 
-            # Both pick modifiers & ready up over TCP sockets!
-            c_drone.send_drone_input(DroneInput(pick_modifier="sport_motors", ready=True))
-            c_truck.send_truck_input(TruckInput(pick_modifier="anti_drone_cage", ready=True))
+            # Ready up over TCP sockets; server keeps its random modifiers authoritative
+            c_drone.send_drone_input(DroneInput(ready=True))
+            c_truck.send_truck_input(TruckInput(ready=True))
             c_drone.send_ping()
 
             deadline = time.perf_counter() + 2.5
@@ -224,9 +261,11 @@ def run_verification_suite(
                 time.sleep(0.02)
 
             assert got_active and snap_d is not None, f"Сервер не перешёл в ACTIVE_ROUND (snap={snap_d})"
-            assert snap_d["drone_mod"] == "sport_motors" and snap_d["truck_mod"] == "anti_drone_cage"
+            valid_d = {m.id for m in DRONE_MODIFIERS}
+            valid_t = {m.id for m in TRUCK_MODIFIERS}
+            assert snap_d["drone_mod"] in valid_d and snap_d["truck_mod"] in valid_t
 
-            # Drive truck forward over network for 15 ticks
+            # Drive truck & fire ballistic projectiles over network
             z_before = snap_d["truck"]["pos"][2]
             for _ in range(12):
                 c_truck.send_truck_input(TruckInput(accel=1.0, fire_turret=True))
@@ -248,6 +287,7 @@ def run_verification_suite(
         if not pygame.get_init():
             pygame.init()
         ic = InputController()
+        assert ic.acro_toggle is True, "Режим FPV по умолчанию должен быть Acro!"
         snaps = ic.get_joystick_Snapshot()
         assert apply_deadzone(0.05, 0.12) == 0.0
         assert abs(apply_deadzone(1.0, 0.12) - 1.0) < 1e-5
@@ -255,11 +295,11 @@ def run_verification_suite(
         t_inp = ic.build_truck_input(1 / 60.0, mouse_captured=False)
         assert isinstance(d_inp, DroneInput) and isinstance(t_inp, TruckInput)
         joy_info = f"подключено устройств: {len(snaps)}" if snaps else "подсистема SDL2 Joystick активна (ожидание геймпада/аппаратуры)"
-        return f"Gamepad + Radiomaster Mode 2 готовы ({joy_info})"
+        return f"Gamepad + Radiomaster Mode 2 + Acro готовы ({joy_info})"
 
     record("8. Поддержка джойстиков, геймпадов и FPV-аппаратуры", check_joystick_support)
 
-    # 9. Stand-off airburst mechanic + AA turret tracking lock
+    # 9. Stand-off airburst, turret lock, 3D ballistics (gravity+drag) & Acro FPV flight
     def check_airburst_and_lock() -> str:
         sim = WorldSimulation(seed=4242)
         sim.begin_active_round()
@@ -275,32 +315,46 @@ def run_verification_suite(
         assert sim.drone_detonate_cd > 0.0, "БЧ должна перезаряжаться после подрыва!"
         assert abs(sim.truck_hp - hp_before) < 0.01, "Заряд не должен нанести урон на 25м"
 
-        # Now drop the charge right on the cistern: heavy damage, FPV survives (can attack again)
+        # Now drop the charge right on the cistern: heavy damage, FPV survives
         sim.drone_detonate_cd = 0.0
         sim.drone_pos[:] = sim.truck_pos + np.array([0.0, 2.4, 1.0], dtype=np.float32)
         sim.step(1.0 / 60.0, DroneInput(detonate=True), TruckInput())
         assert sim.drone_alive, "FPV должен остаться в строю после точного сброса БЧ"
         assert sim.truck_hp < hp_before, "Точный сброс БЧ должен наносить урон цистерне!"
 
-        # Turret tracking lock: the gunner needs time to keep the drone inside the reticle
+        # 3D Ballistics: firing turret spawns flying Projectile affected by gravity + air drag
         sim2 = WorldSimulation(seed=4243)
         sim2.begin_active_round()
-        muzzle = sim2.get_turret_muzzle_pos()
-        sim2.drone_pos[:] = muzzle + np.array([0.0, 8.0, -60.0], dtype=np.float32)
+        sim2.drone_pos[:] = sim2.get_turret_muzzle_pos() + np.array([0.0, 15.0, -90.0], dtype=np.float32)
         sim2.turret_yaw = 0.0
-        sim2.turret_pitch = 0.0  # aimed away from the drone on purpose
-        hp_full = sim2.drone_hp
-        for _ in range(120):
-            sim2.step(1.0 / 60.0, DroneInput(), TruckInput(fire_turret=True))
-        assert sim2.drone_hp == hp_full, "Турель не должна попадать, если дрон вне ретикля!"
+        sim2.turret_pitch = 0.0  # aimed flat +Z away from drone
+        sim2.step(1.0 / 60.0, DroneInput(), TruckInput(fire_turret=True))
+        assert len(sim2.projectiles) >= 1, "Выстрел турели должен создавать физический снаряд!"
+        vy0 = float(sim2.projectiles[0].vel[1])
+        spd0 = float(np.linalg.norm(sim2.projectiles[0].vel))
+        for _ in range(15):
+            sim2.step(1.0 / 60.0, DroneInput(), TruckInput())
+        assert len(sim2.projectiles) >= 1
+        assert float(sim2.projectiles[0].vel[1]) < vy0 - 1.5, "Пуля должна падать под действием гравитации!"
+        assert float(np.linalg.norm(sim2.projectiles[0].vel)) < spd0, "Сопротивление воздуха должно замедлять пулю!"
         assert sim2.turret_lock < 0.35, "Без захвата цели турель не должна набирать захват!"
 
+        # Acro quadcopter physics: neutral throttle cannot magically hover; roll tilts thrust vector
+        sim3 = WorldSimulation(seed=4244)
+        sim3.begin_active_round()
+        sim3.drone_vel[:] = 0.0
+        sim3.drone_roll = 0.0
+        for _ in range(30):
+            sim3.step(1.0 / 60.0, DroneInput(throttle=0.0, strafe_axis=0.8, acro_mode=True), TruckInput())
+        assert abs(sim3.drone_roll) > 0.35, "В режиме Акро крен должен удерживаться без автовыравнивания!"
+        assert float(sim3.drone_vel[1]) < -1.0, "При нейтральном газе дрон должен снижаться под действием гравитации!"
+
         return (
-            "Дистанционный подрыв БЧ сохраняет FPV, точный сброс наносит урон, "
-            "а ПВО наводится только при удержании цели в ретикле"
+            "Подрыв БЧ, 3D-баллистика пуль (гравитация + сопротивление воздуха), "
+            "захват ПВО и Acro-динамика квадрокоптера работают корректно"
         )
 
-    record("9. Механика подрыва БЧ и захват цели зенитной турелью", check_airburst_and_lock)
+    record("9. БЧ, 3D-баллистика пуль, захват ПВО и Acro-полёт FPV", check_airburst_and_lock)
 
     # 10. Near-plane clipping topology + rebindable control profile
     def check_clipping_and_controls() -> str:
@@ -318,7 +372,6 @@ def run_verification_suite(
                 v[:, 0], v[:, 1], v[:, 2], cols, norms, ts, near
             )
 
-        # 1 vertex behind the camera -> visible quad split into 2 triangles
         out = _clip([[[0, 0, 0.0], [4, 0, 3.0], [0, 4, 4.0]]])
         assert len(out[0]) == 2, "Грань с 1 вершиной за камерой должна давать 2 треугольника!"
         zs = np.concatenate([out[0][:, 2], out[1][:, 2], out[2][:, 2]])
@@ -326,13 +379,11 @@ def run_verification_suite(
         w = np.cross(out[1] - out[0], out[2] - out[0])[:, 2]
         assert np.all(w > 0), "Клиппинг должен сохранять ориентацию грани (CCW)!"
 
-        # 2 vertices behind the camera -> single triangle
         out = _clip([[[0, 0, 3.0], [4, 0, 0.0], [0, 4, 0.5]]])
         assert len(out[0]) == 1, "Грань с 2 вершинами за камерой должна давать 1 треугольник!"
         zs = np.concatenate([out[0][:, 2], out[1][:, 2], out[2][:, 2]])
         assert zs.min() >= near - 1e-6, "После клиппинга не должно остаться вершин за камерой!"
 
-        # Rebinding profile: default -> rebind -> reset -> JSON round-trip
         profile = JoystickProfile()
         ic = InputController(profile)
         default_key = ic.key_for("drone_forward")
