@@ -304,7 +304,7 @@ def run_verification_suite(
             pygame.init()
         ic = InputController()
         assert ic.acro_toggle is False, "FPV должен запускаться со стабилизацией!"
-        ic.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3))
+        ic.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3), draft_mode=True)
         options = [m.id for m in DRONE_MODIFIERS[:3]]
         assert ic.build_drone_input(1/60, False, options).pick_modifier == options[2]
         snaps = ic.get_joystick_Snapshot()
