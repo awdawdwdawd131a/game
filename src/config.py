@@ -3,7 +3,7 @@ Configuration, constants, weather presets, and round modifiers
 for Crimean Bridge 1v1 (FPV Drone vs Fuel Truck).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@ TICK_RATE = 60
 DT = 1.0 / TICK_RATE
 MAX_ROUNDS_TO_WIN = 3        # Best of 5 (first to 3 wins)
 ROUND_TIME_LIMIT = 95.0      # Seconds per round before truck auto-survives if close or timeout
-MODIFIER_PICK_TIME = 10.0    # Seconds in pre-round random loadout briefing phase
+MODIFIER_PICK_TIME = 30.0    # Seconds in pre-round random loadout briefing phase
 ROUND_END_DELAY = 4.5        # Seconds showing round winner banner
 
 # ---------------------------------------------------------------------------
@@ -64,13 +64,13 @@ TURRET_COOL_RATE = 0.38
 TURRET_RANGE = 260.0             # Ballistic range; bullets drop & slow down with distance
 TURRET_BULLET_SPEED = 360.0      # m/s muzzle velocity (requires real lead against moving FPV)
 TURRET_BULLET_DRAG = 0.16
-TURRET_DMG = 12.0                # Honest ballistic hit damage (~8-9 hits down a stock 100 HP FPV)
+TURRET_DMG = 17.0                # About six hits down a stock 100 HP FPV
 TURRET_LOCK_TIME = 0.65          # Ballistic FCS tracking buildup (no damage nerf on hits!)
 TURRET_LOCK_CONE = 0.22          # radians, half-angle of tracking cone
 
 EW_JAMMER_DURATION = 5.0         # Electronic Warfare (РЭБ) active pulse
 EW_JAMMER_COOLDOWN = 11.0
-EW_JAMMER_RADIUS = 105.0
+EW_JAMMER_RADIUS = 55.0
 
 SMOKE_DURATION = 6.5             # Aerosol smoke screen
 SMOKE_COOLDOWN = 12.0
@@ -81,9 +81,9 @@ DRONE_BASE_HP = 100.0
 DRONE_BASE_LIVES = 3             # 3 FPV drones in operator's quiver per round
 DRONE_RESPAWN_DELAY = 3.2
 DRONE_MAX_SPEED = 54.0           # m/s (~194 km/h fast FPV)
-DRONE_THRUST = 34.0              # m/s^2 rotor thrust along tilted quad axis
+DRONE_THRUST = 38.0              # m/s^2 assisted flight thrust
 DRONE_GRAVITY = 9.81
-DRONE_DRAG = 0.15                # Lower artificial drag -> real momentum/inertia & high dive speed!
+DRONE_DRAG = 0.42                # Classic assisted FPV response
 DRONE_BATTERY_SECONDS = 45.0     # Flight time per drone before battery dies
 DRONE_EXPLOSION_RADIUS = 13.5
 DRONE_DIRECT_DAMAGE = 66.0       # 2 clean direct kamikaze strikes destroy a stock 125 HP truck!
@@ -160,8 +160,8 @@ WEATHER_PRESETS: List[WeatherPreset] = [
         sky_horizon=(176, 186, 194),
         sea_color=(68, 86, 98),
         fog_color=(178, 188, 195),
-        fog_start=45.0,
-        fog_end=250.0,
+        fog_start=18.0,
+        fog_end=125.0,
         ambient_light=0.78,
         wind_vec=(-1.5, 0.2, 0.8),
         gust_strength=1.0,
@@ -236,7 +236,7 @@ WEATHER_PRESETS: List[WeatherPreset] = [
     WeatherPreset(
         id="night_spotlight",
         name_ru="Ночная тревога (Прожекторы)",
-        description_ru="Темнота над проливом. Освещение только от фонарей моста и фар бензовоза. Тепловизор дрона помогает!",
+        description_ru="Темнота над проливом. Видны фонари моста и фары бензовоза.",
         sky_top=(8, 12, 24),
         sky_horizon=(20, 28, 48),
         sea_color=(6, 12, 22),
@@ -289,6 +289,23 @@ WEATHER_PRESETS: List[WeatherPreset] = [
     ),
 ]
 
+# Additional conditions share the same physical and visual weather model.
+WEATHER_PRESETS.extend([
+    replace(WEATHER_PRESETS[1], id="sea_mist", name_ru="Морской туман на рассвете",
+            description_ru="Очень плотная морось и туман скрывают мост уже вблизи.",
+            sky_top=(100, 119, 128), sky_horizon=(157, 175, 181), fog_color=(158, 176, 181),
+            fog_start=8.0, fog_end=85.0, wind_vec=(1.5, 0.0, 0.5), rain_intensity=0.25),
+    replace(WEATHER_PRESETS[2], id="cold_rain", name_ru="Холодный осенний дождь",
+            description_ru="Серое небо, дождь и скользкая дорога.", sky_top=(72, 82, 92),
+            sky_horizon=(123, 135, 145), fog_color=(128, 139, 148), fog_start=55.0,
+            fog_end=240.0, wind_vec=(4.0, 0.0, 2.0), gust_strength=3.0,
+            rain_intensity=0.7, lightning_chance=0.0, ambient_light=0.68),
+    replace(WEATHER_PRESETS[4], id="foggy_night", name_ru="Туманная ночь",
+            description_ru="Ночь и густой туман: цель видна только вблизи.",
+            fog_start=15.0, fog_end=115.0, star_density=0.0, cloud_amount=0.85,
+            sun_glow=0.1, city_lights=0.15, wind_vec=(-1.0, 0.0, 0.5)),
+])
+
 WEATHER_BY_ID: Dict[str, WeatherPreset] = {w.id: w for w in WEATHER_PRESETS}
 
 
@@ -337,9 +354,9 @@ DRONE_MODIFIERS: List[ModifierDef] = [
     ModifierDef(
         id="airburst_frag",
         role="drone",
-        name_ru="Осколочный подрыв + Тепловизор",
-        short_ru="+55% радиус взрыва и ИК-подсветка цели",
-        desc_ru="Мощный осколочный разлёт накрывает бензовоз с дистанции, а тепловизор подсвечивает тягач в тумане и дыму.",
+        name_ru="Осколочный подрыв",
+        short_ru="+55% радиус взрыва",
+        desc_ru="Мощный осколочный разлёт накрывает бензовоз с дистанции.",
     ),
     ModifierDef(
         id="stealth_matte",
@@ -390,7 +407,7 @@ TRUCK_MODIFIERS: List[ModifierDef] = [
         id="ew_kupol",
         role="truck",
         name_ru="Мощный РЭБ «Купол-М»",
-        short_ru="+60% радиус РЭБ (168м), дольше работа и быстрее откат",
+        short_ru="+35% радиус РЭБ (74м), дольше работа и быстрее откат",
         desc_ru="Широкополосная глушилка засыпает экран оператора помехами и уводит рули радио-дрона на подлёте.",
     ),
     ModifierDef(
@@ -447,7 +464,7 @@ TRUCK_MODIFIERS: List[ModifierDef] = [
         role="truck",
         name_ru="Термодымовая завеса ТДА",
         short_ru="Гигантская дымзавеса (2 облака, 9с) + быстрее откат РЭБ/дыма",
-        desc_ru="Густой термодым накрывает участок моста за тягачом, скрывая бензовоз даже от ИК-тепловизора на дистанции.",
+        desc_ru="Густой термодым накрывает участок моста за тягачом, скрывая бензовоз от обзора.",
     ),
 ]
 

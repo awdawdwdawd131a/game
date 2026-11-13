@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 
+from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS
 from .math3d import clamp
 from .physics import DroneInput, TruckInput
 
@@ -60,12 +61,12 @@ DEFAULT_KEYBINDS: Dict[str, int] = {
 }
 
 KEYBIND_LABELS_RU: Dict[str, str] = {
-    "drone_forward": "FPV: Вперёд (газ по горизонтали)",
+    "drone_forward": "FPV: Вперёд",
     "drone_back": "FPV: Назад",
-    "drone_left": "FPV: Влево (крен)",
-    "drone_right": "FPV: Вправо (крен)",
-    "drone_throttle_up": "FPV: Набор высоты (газ)",
-    "drone_throttle_down": "FPV: Снижение высоты",
+    "drone_left": "FPV: Влево",
+    "drone_right": "FPV: Вправо",
+    "drone_throttle_up": "FPV: Подняться",
+    "drone_throttle_down": "FPV: Опуститься",
     "drone_boost": "FPV: Форсаж (boost)",
     "drone_detonate": "FPV: Подрыв БЧ (дистанционный)",
     "drone_acro": "FPV: Режим Acro / Angle",
@@ -186,8 +187,8 @@ class InputController:
         self.profile = profile or JoystickProfile()
         self._joysticks: Dict[int, pygame.joystick.JoystickType] = {}
         self.active_joy_id: Optional[int] = None
-        # Default to harder Acro (manual rate/attitude hold) for FPV drone; X toggles Angle assist
-        self.acro_toggle: bool = True
+        # Classic stabilized FPV controls by default; X toggles Acro.
+        self.acro_toggle: bool = False
 
         # One-shot button/key latch states per frame.
         # Фиксаторы РАЗДЕЛЕНЫ по ролям: иначе клавиши F/E/Q (одинаковые
@@ -197,6 +198,8 @@ class InputController:
         self._one_truck_ew = False       # РЭБ-купол (роль: бензовоз)
         self._one_truck_smoke = False    # дымовая завеса (роль: бензовоз)
         self._one_ready = False
+        self._modifier_index = None
+        self._draft_cursor = 0
 
         self.refresh_joysticks()
 
@@ -228,7 +231,11 @@ class InputController:
             return
 
         if event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_KP_ENTER, pygame.K_r):
+            number_keys = (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9, pygame.K_0)
+            if event.key in number_keys:
+                self._modifier_index = number_keys.index(event.key)
+                self._draft_cursor = self._modifier_index
+            elif event.key in (pygame.K_KP_ENTER, pygame.K_r):
                 self._one_ready = True
             elif event.key == self.key_for("truck_ready"):
                 self._one_ready = True
@@ -247,6 +254,10 @@ class InputController:
                 self.profile.fpv_radio_mode2 = not self.profile.fpv_radio_mode2
             elif event.key == self.key_for("drone_acro"):
                 self.acro_toggle = not self.acro_toggle
+
+        elif event.type == pygame.JOYHATMOTION and event.value[1]:
+            self._draft_cursor = (self._draft_cursor - event.value[1]) % 10
+            self._modifier_index = self._draft_cursor
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 3:  # Right Mouse Button -> Shotgun (for Truck) or Detonate (for Drone)
@@ -436,6 +447,7 @@ class InputController:
             boost=boost,
             detonate=self._one_detonate,
             acro_mode=self.acro_toggle,
+            pick_modifier=DRONE_MODIFIERS[self._modifier_index].id if self._modifier_index is not None else "",
             ready=self._one_ready,
         )
         self._clear_latches()
@@ -490,6 +502,7 @@ class InputController:
             fire_shotgun=self._one_truck_shotgun,
             trigger_ew=self._one_truck_ew,
             trigger_smoke=self._one_truck_smoke,
+            pick_modifier=TRUCK_MODIFIERS[self._modifier_index].id if self._modifier_index is not None else "",
             ready=self._one_ready,
         )
         self._clear_latches()
@@ -501,3 +514,4 @@ class InputController:
         self._one_truck_ew = False
         self._one_truck_smoke = False
         self._one_ready = False
+        self._modifier_index = None
