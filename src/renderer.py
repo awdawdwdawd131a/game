@@ -1658,6 +1658,7 @@ class SceneRenderer3D:
         sim: WorldSimulation,
         my_role: str,
         net_status: str = "",
+        draft_choice: Optional[str] = None,
     ) -> None:
         w, h = surface.get_size()
         cx, cy = w // 2, h // 2
@@ -1668,14 +1669,15 @@ class SceneRenderer3D:
             surface.blit(dim, (0, 0))
             by_id = DRONE_MOD_BY_ID if my_role == "drone" else TRUCK_MOD_BY_ID
             options = sim.drone_draft_options if my_role == "drone" else sim.truck_draft_options
-            selected = sim.drone_mod if my_role == "drone" else sim.truck_mod
-            ready = sim.drone_draft_ready if my_role == "drone" else sim.truck_draft_ready
+            server_selected = sim.drone_mod if my_role == "drone" else sim.truck_mod
+            selected = draft_choice if draft_choice in options else server_selected
+            ready = (sim.drone_draft_ready if my_role == "drone" else sim.truck_draft_ready) and selected == server_selected
             bridge = "автомобильный" if sim.bridge_route == "road" else "железнодорожный"
             title = self.font_md.render(f"РАУНД {sim.round_number} | МОСТ: {bridge.upper()}", True, (255, 218, 95))
             surface.blit(title, (cx - title.get_width() // 2, 18))
             weather = self.font_sm.render(f"Погода: {sim.weather.name_ru}", True, (115, 215, 255))
             surface.blit(weather, (cx - weather.get_width() // 2, 48))
-            hint = self.font_xs.render("Три случайных варианта: выберите 1, 2, 3 или крестовиной геймпада", True, (215, 228, 244))
+            hint = self.font_xs.render("Выбор: стрелки вверх/вниз, 1–3 или крестовина геймпада", True, (215, 228, 244))
             surface.blit(hint, (cx - hint.get_width() // 2, 76))
 
             if not options:

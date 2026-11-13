@@ -90,6 +90,7 @@ class DesktopGameApp:
         self.hosted_server: Optional[GameServer] = None
         self.net_client: Optional[GameClient] = None
         self._net_has_snapshot = False
+        self._draft_navigation_key = None
         # Экран ожидания подключения (не блокирует GUI)
         self.join_target: str = ""
         self.join_elapsed: float = 0.0
@@ -177,6 +178,23 @@ class DesktopGameApp:
     # -----------------------------------------------------------------------
     # Event Dispatch
     # -----------------------------------------------------------------------
+    def _sync_draft_navigation(self) -> bool:
+        """Keep the local cursor stable while server snapshots are in flight."""
+        if self.state not in ("GAME_LOCAL", "GAME_NET") or self.sim.phase != "MODIFIER_DRAFT":
+            self._draft_navigation_key = None
+            return False
+        options = self.sim.drone_draft_options if self.my_role == "drone" else self.sim.truck_draft_options
+        selected = self.sim.drone_mod if self.my_role == "drone" else self.sim.truck_mod
+        if options:
+            key = (self.sim.round_number, self.my_role, tuple(options))
+            previous = getattr(self, "_draft_navigation_key", None)
+            if key != previous:
+                if previous is not None or self.controls._modifier_index is None:
+                    self.controls._modifier_index = None
+                    self.controls._draft_cursor = options.index(selected) if selected in options else 0
+                self._draft_navigation_key = key
+        return True
+
     def _process_events(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -187,14 +205,8 @@ class DesktopGameApp:
                 self.screen = pygame.display.set_mode((max(800, event.w), max(520, event.h)), pygame.RESIZABLE)
                 self.renderer.resize(self.screen.get_width(), self.screen.get_height())
 
-            if (self.state in ("GAME_LOCAL", "GAME_NET") and self.sim.phase == "MODIFIER_DRAFT"
-                    and event.type == pygame.JOYHATMOTION and event.value[1]
-                    and self.controls._modifier_index is None):
-                options = self.sim.drone_draft_options if self.my_role == "drone" else self.sim.truck_draft_options
-                selected = self.sim.drone_mod if self.my_role == "drone" else self.sim.truck_mod
-                if selected in options:
-                    self.controls._draft_cursor = options.index(selected)
-            self.controls.handle_event(event)
+            draft_mode = self._sync_draft_navigation()
+            self.controls.handle_event(event, draft_mode=draft_mode)
 
             if self.state == "MENU":
                 self._handle_menu_event(event)
@@ -284,6 +296,8 @@ class DesktopGameApp:
         self.sim = WorldSimulation()
         # Enter in the menu must not also confirm the new draft.
         self.controls._clear_latches()
+        self.controls._draft_cursor = 0
+        self._draft_navigation_key = None
         self.state = "GAME_LOCAL"
         self._last_game_phase = self.sim.phase
         self._set_mouse_capture(False)
@@ -388,7 +402,9 @@ class DesktopGameApp:
             self.sim.drone_draft_options = []
             self.sim.truck_draft_options = []
             self.controls._clear_latches()
+            self.controls._draft_cursor = 0
             self._net_has_snapshot = False
+            self._draft_navigation_key = None
             self.state = "GAME_NET"
             self._start_auto_host_setup(bound)
         except OSError as exc:
@@ -550,6 +566,7 @@ class DesktopGameApp:
     # Frame Update
     # -----------------------------------------------------------------------
     def _update(self, dt: float) -> None:
+        self._sync_draft_navigation()
         if self.state == "MENU":
             self._menu_flyby_t += dt
             return
@@ -585,6 +602,7 @@ class DesktopGameApp:
             if snap is not None:
                 self.sim.apply_snapshot(snap)
                 self._net_has_snapshot = True
+                self._sync_draft_navigation()
             if not self._net_has_snapshot:
                 return
 
@@ -622,8 +640,10 @@ class DesktopGameApp:
                 self.sim.drone_draft_options = []
                 self.sim.truck_draft_options = []
                 self._net_has_snapshot = False
+                self._draft_navigation_key = None
                 # Do not carry the Enter used in the connection menu into the draft.
                 self.controls._clear_latches()
+                self.controls._draft_cursor = 0
                 self.state = "GAME_NET"
                 self._last_game_phase = self.sim.phase
                 self.status_banner = ""
@@ -903,7 +923,12 @@ class DesktopGameApp:
             self.screen.blit(ping_lbl, (self.screen.get_width() - ping_lbl.get_width() - 16, 48))
 
         if self.sim.phase != "ACTIVE_ROUND":
-            self.renderer.draw_phase_overlay(self.screen, self.sim, self.my_role, net_status=net_info)
+            draft_choice = None
+            if self._sync_draft_navigation():
+                options = self.sim.drone_draft_options if self.my_role == "drone" else self.sim.truck_draft_options
+                if options and 0 <= self.controls._draft_cursor < len(options):
+                    draft_choice = options[self.controls._draft_cursor]
+            self.renderer.draw_phase_overlay(self.screen, self.sim, self.my_role, net_status=net_info, draft_choice=draft_choice)
         elif not self.mouse_captured:
             hint = self.renderer.font_sm.render(
                 "Кликните ЛКМ или нажмите [TAB] для захвата мыши  |  [ESC] — Выход в меню",

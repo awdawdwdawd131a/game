@@ -35,10 +35,10 @@ class GameplayRegressionTests(unittest.TestCase):
         self.assertEqual(inp.forward_Axis, 1.0)
         self.assertEqual(inp.throttle, 1.0)
         options = [m.id for m in DRONE_MODIFIERS[:3]]
-        ctrl.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3))
+        ctrl.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3), draft_mode=True)
         self.assertEqual(ctrl.build_drone_input(1 / 60, False, options).pick_modifier, options[2])
         self.assertFalse(ctrl.build_drone_input(1 / 60, False, options).pick_modifier)
-        ctrl.handle_event(pygame.event.Event(pygame.JOYHATMOTION, value=(0, -1), joy=0, hat=0))
+        ctrl.handle_event(pygame.event.Event(pygame.JOYHATMOTION, value=(0, -1), joy=0, hat=0), draft_mode=True)
         self.assertEqual(ctrl.build_drone_input(1 / 60, False, options).pick_modifier, options[0])
 
     def test_menu_enter_does_not_auto_confirm_draft(self):

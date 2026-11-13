@@ -224,16 +224,20 @@ class InputController:
         elif not self._joysticks:
             self.active_joy_id = None
 
-    def handle_event(self, event: pygame.event.Event) -> None:
+    def handle_event(self, event: pygame.event.Event, draft_mode: bool = False) -> None:
         if event.type in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED):
             self.refresh_joysticks()
             return
 
         if event.type == pygame.KEYDOWN:
             number_keys = (pygame.K_1, pygame.K_2, pygame.K_3)
-            if event.key in number_keys:
+            if draft_mode and event.key in number_keys:
                 self._modifier_index = number_keys.index(event.key)
                 self._draft_cursor = self._modifier_index
+            elif draft_mode and event.key in (pygame.K_UP, pygame.K_DOWN):
+                delta = -1 if event.key == pygame.K_UP else 1
+                self._draft_cursor = (self._draft_cursor + delta) % 3
+                self._modifier_index = self._draft_cursor
             elif event.key in (pygame.K_KP_ENTER, pygame.K_r):
                 self._one_ready = True
             elif event.key == self.key_for("truck_ready"):
@@ -254,7 +258,7 @@ class InputController:
             elif event.key == self.key_for("drone_acro"):
                 self.acro_toggle = not self.acro_toggle
 
-        elif event.type == pygame.JOYHATMOTION and event.value[1]:
+        elif draft_mode and event.type == pygame.JOYHATMOTION and event.value[1]:
             self._draft_cursor = (self._draft_cursor - event.value[1]) % 3
             self._modifier_index = self._draft_cursor
 
