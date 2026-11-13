@@ -89,6 +89,7 @@ class DesktopGameApp:
 
         self.hosted_server: Optional[GameServer] = None
         self.net_client: Optional[GameClient] = None
+        self._net_has_snapshot = False
         # Экран ожидания подключения (не блокирует GUI)
         self.join_target: str = ""
         self.join_elapsed: float = 0.0
@@ -186,6 +187,13 @@ class DesktopGameApp:
                 self.screen = pygame.display.set_mode((max(800, event.w), max(520, event.h)), pygame.RESIZABLE)
                 self.renderer.resize(self.screen.get_width(), self.screen.get_height())
 
+            if (self.state in ("GAME_LOCAL", "GAME_NET") and self.sim.phase == "MODIFIER_DRAFT"
+                    and event.type == pygame.JOYHATMOTION and event.value[1]
+                    and self.controls._modifier_index is None):
+                options = self.sim.drone_draft_options if self.my_role == "drone" else self.sim.truck_draft_options
+                selected = self.sim.drone_mod if self.my_role == "drone" else self.sim.truck_mod
+                if selected in options:
+                    self.controls._draft_cursor = options.index(selected)
             self.controls.handle_event(event)
 
             if self.state == "MENU":
@@ -377,6 +385,10 @@ class DesktopGameApp:
             self.net_client = cli
             self.my_role = cli.role
             self.sim = WorldSimulation()
+            self.sim.drone_draft_options = []
+            self.sim.truck_draft_options = []
+            self.controls._clear_latches()
+            self._net_has_snapshot = False
             self.state = "GAME_NET"
             self._start_auto_host_setup(bound)
         except OSError as exc:
@@ -551,11 +563,11 @@ class DesktopGameApp:
             self._last_game_phase = self.sim.phase
 
             if self.my_role == "drone":
-                d_in = self.controls.build_drone_input(dt, self.mouse_captured)
+                d_in = self.controls.build_drone_input(dt, self.mouse_captured, self.sim.drone_draft_options)
                 t_in = self.bot_truck.compute_input(self.sim, dt)
             else:
                 d_in = self.bot_drone.compute_input(self.sim, dt)
-                t_in = self.controls.build_truck_input(dt, self.mouse_captured)
+                t_in = self.controls.build_truck_input(dt, self.mouse_captured, self.sim.truck_draft_options)
 
             self.sim.step(dt, d_in, t_in)
             self._trigger_audio_cues()
@@ -572,15 +584,18 @@ class DesktopGameApp:
             snap = self.net_client.pop_latest_snapshot()
             if snap is not None:
                 self.sim.apply_snapshot(snap)
+                self._net_has_snapshot = True
+            if not self._net_has_snapshot:
+                return
 
             if self.sim.phase != "ACTIVE_ROUND" and self.mouse_captured:
                 self._set_mouse_capture(False)
 
             if self.my_role == "drone":
-                d_in = self.controls.build_drone_input(dt, self.mouse_captured)
+                d_in = self.controls.build_drone_input(dt, self.mouse_captured, self.sim.drone_draft_options)
                 self.net_client.send_drone_input(d_in)
             else:
-                t_in = self.controls.build_truck_input(dt, self.mouse_captured)
+                t_in = self.controls.build_truck_input(dt, self.mouse_captured, self.sim.truck_draft_options)
                 self.net_client.send_truck_input(t_in)
 
             self._trigger_audio_cues()
@@ -604,6 +619,9 @@ class DesktopGameApp:
             if res:
                 self.my_role = cli.role
                 self.sim = WorldSimulation()
+                self.sim.drone_draft_options = []
+                self.sim.truck_draft_options = []
+                self._net_has_snapshot = False
                 # Do not carry the Enter used in the connection menu into the draft.
                 self.controls._clear_latches()
                 self.state = "GAME_NET"

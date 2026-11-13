@@ -2,7 +2,7 @@
 Authoritative 3D Physics & Match Simulation for Crimean Bridge 1v1:
 - Match state machine: MODIFIER_DRAFT -> ACTIVE_ROUND -> ROUND_END -> MATCH_OVER
 - Weather rotates without consecutive repeats; road and railway alternate each round
-- 10 modifiers per role selectable during the draft
+- Three random modifiers per role offered during each draft
 - Realistic 3D projectile ballistics (gravity drop, aerodynamic drag, truck velocity inheritance,
   continuous swept collision, ballistic lead solver)
 - Assisted FPV movement with momentum, wind, selectable camera leveling and EW interference
@@ -192,15 +192,15 @@ class WorldSimulation:
         self.round_reason_ru: str = ""
         self.match_winner: str = ""
 
-        # Shuffled bags for random non-repeating Weather and Modifiers!
+        # Weather rotation and this round's authoritative modifier offers.
         self._weather_bag: List[str] = []
-        self._drone_mod_bag: List[str] = []
-        self._truck_mod_bag: List[str] = []
+        self.drone_draft_options: List[str] = []
+        self.truck_draft_options: List[str] = []
         self.weather_id: str = "clear_day"
         self.lightning_flash: float = 0.0
         self.sim_time: float = 0.0
 
-        # Active Modifiers per player (randomly issued each round)
+        # Selected modifiers; the first offered option is the default.
         self.drone_mod: str = DRONE_MODIFIERS[0].id
         self.truck_mod: str = TRUCK_MODIFIERS[0].id
         self.drone_draft_ready: bool = False
@@ -307,22 +307,11 @@ class WorldSimulation:
         self.weather_id = self._weather_bag.pop(0)
 
     def _pick_next_modifiers(self) -> None:
-        """Draws a fresh random modifier for both FPV Drone and Fuel Truck without repeats."""
-        if not self._drone_mod_bag:
-            ids = [m.id for m in DRONE_MODIFIERS]
-            self.rng.shuffle(ids)
-            if ids[0] == self.drone_mod and len(ids) > 1:
-                ids[0], ids[-1] = ids[-1], ids[0]
-            self._drone_mod_bag = ids
-        self.drone_mod = self._drone_mod_bag.pop(0)
-
-        if not self._truck_mod_bag:
-            ids = [m.id for m in TRUCK_MODIFIERS]
-            self.rng.shuffle(ids)
-            if ids[0] == self.truck_mod and len(ids) > 1:
-                ids[0], ids[-1] = ids[-1], ids[0]
-            self._truck_mod_bag = ids
-        self.truck_mod = self._truck_mod_bag.pop(0)
+        """Authoritatively deal three distinct options per role, once per round."""
+        self.drone_draft_options = self.rng.sample([m.id for m in DRONE_MODIFIERS], 3)
+        self.truck_draft_options = self.rng.sample([m.id for m in TRUCK_MODIFIERS], 3)
+        self.drone_mod = self.drone_draft_options[0]
+        self.truck_mod = self.truck_draft_options[0]
 
     def reset_full_match(self) -> None:
         self.round_number = 1
@@ -330,8 +319,6 @@ class WorldSimulation:
         self.truck_score = 0
         self.match_winner = ""
         self._weather_bag.clear()
-        self._drone_mod_bag.clear()
-        self._truck_mod_bag.clear()
         self.start_modifier_draft(advance_weather=True)
 
     def start_modifier_draft(self, advance_weather: bool = True) -> None:
@@ -363,6 +350,8 @@ class WorldSimulation:
             bonus_hp = 15.0
         elif self.truck_mod == "auto_extinguisher":
             bonus_hp = 35.0
+        elif self.truck_mod == "heavy_armor":
+            bonus_hp = 50.0
         self.truck_max_hp = TRUCK_BASE_HP + bonus_hp
         self.truck_hp = self.truck_max_hp
         self.truck_reactive_ready = self.truck_mod == "reactive_armor"
@@ -396,12 +385,16 @@ class WorldSimulation:
             hp_mult = 1.45
         elif self.drone_mod == "long_range_lipo":
             hp_mult = 1.25
+        elif self.drone_mod == "light_frame":
+            hp_mult = 0.75
 
         bat_mult = 1.0
         if self.drone_mod == "fiber_optic":
             bat_mult = 1.20
         elif self.drone_mod == "long_range_lipo":
             bat_mult = 1.75
+        elif self.drone_mod == "rapid_respawn":
+            bat_mult = 0.80
 
         self.drone_max_hp = DRONE_BASE_HP * hp_mult
         self.drone_hp = self.drone_max_hp
@@ -475,15 +468,17 @@ class WorldSimulation:
         """Accept role-specific selection/ready events, including while waiting in a lobby."""
         if self.phase != "MODIFIER_DRAFT":
             return
-        if isinstance(drone_in.pick_modifier, str) and drone_in.pick_modifier in {m.id for m in DRONE_MODIFIERS}:
+        drone_valid = not drone_in.pick_modifier or (isinstance(drone_in.pick_modifier, str) and drone_in.pick_modifier in self.drone_draft_options)
+        truck_valid = not truck_in.pick_modifier or (isinstance(truck_in.pick_modifier, str) and truck_in.pick_modifier in self.truck_draft_options)
+        if drone_in.pick_modifier and drone_valid:
             self.drone_mod = drone_in.pick_modifier
             self.drone_draft_ready = False
-        if isinstance(truck_in.pick_modifier, str) and truck_in.pick_modifier in {m.id for m in TRUCK_MODIFIERS}:
+        if truck_in.pick_modifier and truck_valid:
             self.truck_mod = truck_in.pick_modifier
             self.truck_draft_ready = False
-        if drone_in.ready:
+        if drone_in.ready and drone_valid:
             self.drone_draft_ready = True
-        if truck_in.ready:
+        if truck_in.ready and truck_valid:
             self.truck_draft_ready = True
 
     def step(self, dt: float, drone_in: DroneInput, truck_in: TruckInput) -> None:
@@ -540,9 +535,9 @@ class WorldSimulation:
     def _step_truck(self, dt: float, inp: TruckInput) -> None:
         w = self.weather
         v12 = self.truck_mod == "v12_biturbo"
-        max_spd = TRUCK_BASE_MAX_SPEED * (1.25 if v12 else 1.0)
-        accel_rate = TRUCK_BASE_ACCEL * (1.35 if v12 else 1.0)
-        grip = min(1.0, w.truck_grip * (1.40 if v12 else 1.0))
+        max_spd = TRUCK_BASE_MAX_SPEED * (1.25 if v12 else (0.85 if self.truck_mod == "heavy_armor" else 1.0))
+        accel_rate = TRUCK_BASE_ACCEL * (1.35 if v12 else (1.10 if self.truck_mod == "traction_control" else 1.0))
+        grip = min(1.0, w.truck_grip * (1.40 if v12 else (1.35 if self.truck_mod == "traction_control" else 1.0)))
 
         # Auto-extinguisher passive repair after 4.0s out of combat blast
         self.truck_last_hit_timer += dt
@@ -606,7 +601,7 @@ class WorldSimulation:
         if self.ew_active_timer > 0.0:
             self.ew_active_timer = max(0.0, self.ew_active_timer - dt)
 
-        cool_mult = 1.4 if self.truck_mod == "twin_zu_turret" else 1.0
+        cool_mult = 1.4 if self.truck_mod == "twin_zu_turret" else (1.8 if self.truck_mod == "turret_cooling" else 1.0)
         self.turret_heat = max(0.0, self.turret_heat - TURRET_COOL_RATE * cool_mult * dt)
         if self.turret_overheated and self.turret_heat < 0.25:
             self.turret_overheated = False
@@ -635,7 +630,7 @@ class WorldSimulation:
             bcomp = self.truck_mod == "ballistic_computer"
             flak = self.truck_mod == "flak_shrapnel"
             self.turret_cd = TURRET_FIRE_INTERVAL * (0.58 if twin else 1.0)
-            self.turret_heat += TURRET_HEAT_PER_SHOT * (0.60 if twin else 1.0)
+            self.turret_heat += TURRET_HEAT_PER_SHOT * (0.60 if twin else (0.75 if self.truck_mod == "turret_cooling" else 1.0))
             if self.turret_heat >= 1.0:
                 self.turret_heat = 1.0
                 self.turret_overheated = True
@@ -687,7 +682,7 @@ class WorldSimulation:
         # 2) Anti-FPV Buckshot Shotgun ("Перехват" — Ballistic Pellet Cloud!)
         if inp.fire_shotgun and self.shotgun_cd <= 0.0:
             buck_mod = self.truck_mod == "buckshot_radar"
-            self.shotgun_cd = SHOTGUN_COOLDOWN * (0.82 if buck_mod else 1.0)
+            self.shotgun_cd = SHOTGUN_COOLDOWN * (0.82 if buck_mod else (0.60 if self.truck_mod == "rapid_shotgun" else 1.0))
             pellets = SHOTGUN_PELLETS * (2 if buck_mod else 1)
             spread_rad = math.radians(SHOTGUN_SPREAD_DEG * (1.12 if buck_mod else 1.0))
             max_rng = SHOTGUN_RANGE * (1.15 if buck_mod else 1.0)
@@ -703,7 +698,7 @@ class WorldSimulation:
                         pos=muzzle_pos.copy(),
                         prev_pos=muzzle_pos.copy(),
                         vel=pvel.astype(np.float32),
-                        damage=SHOTGUN_PELLET_DMG,
+                        damage=SHOTGUN_PELLET_DMG * (0.90 if self.truck_mod == "rapid_shotgun" else 1.0),
                         hit_radius=hit_rad,
                         drag=SHOTGUN_PELLET_DRAG,
                         gravity_mult=1.0,
@@ -729,8 +724,9 @@ class WorldSimulation:
         if inp.trigger_ew and self.ew_cd <= 0.0:
             kupol = self.truck_mod == "ew_kupol"
             tda = self.truck_mod == "flamethrower_smoke"
-            cd_mult = 0.70 if kupol else (0.75 if tda else 1.0)
-            self.ew_active_timer = EW_JAMMER_DURATION * (1.35 if kupol else 1.0)
+            pulse = self.truck_mod == "pulse_jammer"
+            cd_mult = 0.70 if kupol else (0.75 if tda else (0.65 if pulse else 1.0))
+            self.ew_active_timer = EW_JAMMER_DURATION * (1.35 if kupol else (0.80 if pulse else 1.0))
             self.ew_cd = EW_JAMMER_COOLDOWN * cd_mult
             self.last_event_ru = "Водитель включил купол РЭБ!"
 
@@ -877,6 +873,8 @@ class WorldSimulation:
             self.drone_jam_level = 0.0
         elif self.ew_active_timer > 0.0 and dist_to_truck < ew_rad:
             self.drone_jam_level = clamp(0.55 + 0.45 * (1.0 - dist_to_truck / ew_rad), 0.0, 1.0)
+            if self.drone_mod == "signal_filter":
+                self.drone_jam_level *= 0.40
         else:
             self.drone_jam_level = max(0.0, self.drone_jam_level - dt * 4.0)
 
@@ -893,7 +891,7 @@ class WorldSimulation:
         if not self.drone_acro and abs(inp.pitch_delta) < 1e-4 and abs(inp.forward_Axis) < 0.05:
             self.drone_pitch = move_toward(self.drone_pitch, 0.0, dt * 0.85)
 
-        speed_mult = (1.25 if sport else 1.0) * (0.88 if heavy_pg else 1.0) * (0.94 if fiber else 1.0) * (0.95 if lipo else 1.0)
+        speed_mult = (1.25 if sport else 1.0) * (0.88 if heavy_pg else 1.0) * (0.94 if fiber else 1.0) * (0.95 if lipo else 1.0) * (1.15 if self.drone_mod == "light_frame" else 1.0)
         boost_mult = (1.34 if sport else 1.18) if inp.boost else 1.0
         max_spd = DRONE_MAX_SPEED * speed_mult * boost_mult
         thrust_mag = DRONE_THRUST * speed_mult * boost_mult
@@ -1015,7 +1013,7 @@ class WorldSimulation:
         )
         self.drone_alive = False
         self.drone_lives_left -= 1
-        self.drone_respawn_timer = DRONE_RESPAWN_DELAY
+        self.drone_respawn_timer = 1.4 if self.drone_mod == "rapid_respawn" else DRONE_RESPAWN_DELAY
         self.last_event_ru = reason_ru
 
     def _apply_warhead_damage_to_truck(self, origin: np.ndarray, blast_radius: float, base_dmg: float, reason_ru: str) -> str:
@@ -1077,8 +1075,8 @@ class WorldSimulation:
         shaped = self.drone_mod == "shaped_charge"
         tandem = self.drone_mod == "tandem_warhead"
 
-        blast_radius = DRONE_EXPLOSION_RADIUS * (1.55 if frag else 1.0)
-        base_dmg = DRONE_DIRECT_DAMAGE * (1.40 if shaped else (1.20 if tandem else 1.0))
+        blast_radius = DRONE_EXPLOSION_RADIUS * (1.55 if frag else (0.75 if self.drone_mod == "precision_charge" else 1.0))
+        base_dmg = DRONE_DIRECT_DAMAGE * (1.40 if shaped else (1.20 if tandem or self.drone_mod == "precision_charge" else (0.85 if self.drone_mod == "quick_reload" else 1.0)))
         if manual:
             base_dmg *= 0.85
 
@@ -1094,11 +1092,11 @@ class WorldSimulation:
         )
 
         if manual:
-            self.drone_detonate_cd = DRONE_DETONATE_COOLDOWN
+            self.drone_detonate_cd = 2.4 if self.drone_mod == "quick_reload" else DRONE_DETONATE_COOLDOWN
         else:
             self.drone_alive = False
             self.drone_lives_left -= 1
-            self.drone_respawn_timer = DRONE_RESPAWN_DELAY
+            self.drone_respawn_timer = 1.4 if self.drone_mod == "rapid_respawn" else DRONE_RESPAWN_DELAY
         self.last_event_ru = reason_ru
 
     # -----------------------------------------------------------------------
@@ -1158,6 +1156,8 @@ class WorldSimulation:
             "sim_time": round(self.sim_time, 2),
             "drone_mod": self.drone_mod,
             "truck_mod": self.truck_mod,
+            "drone_draft_options": list(self.drone_draft_options),
+            "truck_draft_options": list(self.truck_draft_options),
             "drone_draft_ready": self.drone_draft_ready,
             "truck_draft_ready": self.truck_draft_ready,
             "truck": {
@@ -1235,6 +1235,8 @@ class WorldSimulation:
         self.sim_time = snap["sim_time"]
         self.drone_mod = snap["drone_mod"]
         self.truck_mod = snap["truck_mod"]
+        self.drone_draft_options = list(snap.get("drone_draft_options", [self.drone_mod]))
+        self.truck_draft_options = list(snap.get("truck_draft_options", [self.truck_mod]))
         self.drone_draft_ready = snap["drone_draft_ready"]
         self.truck_draft_ready = snap["truck_draft_ready"]
 

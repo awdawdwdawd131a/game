@@ -24,9 +24,9 @@ import pygame
 from .config import (
     BRIDGE_FINISH_Z,
     BRIDGE_START_Z,
-    DRONE_MOD_BY_ID, DRONE_MODIFIERS,
+    DRONE_MOD_BY_ID,
     ROAD_DECK_Y,
-    TRUCK_MOD_BY_ID, TRUCK_MODIFIERS,
+    TRUCK_MOD_BY_ID,
     WeatherPreset,
 )
 from .math3d import (
@@ -1666,7 +1666,8 @@ class SceneRenderer3D:
             dim = pygame.Surface((w, h), pygame.SRCALPHA)
             dim.fill((8, 12, 22, 232))
             surface.blit(dim, (0, 0))
-            mods = DRONE_MODIFIERS if my_role == "drone" else TRUCK_MODIFIERS
+            by_id = DRONE_MOD_BY_ID if my_role == "drone" else TRUCK_MOD_BY_ID
+            options = sim.drone_draft_options if my_role == "drone" else sim.truck_draft_options
             selected = sim.drone_mod if my_role == "drone" else sim.truck_mod
             ready = sim.drone_draft_ready if my_role == "drone" else sim.truck_draft_ready
             bridge = "автомобильный" if sim.bridge_route == "road" else "железнодорожный"
@@ -1674,30 +1675,35 @@ class SceneRenderer3D:
             surface.blit(title, (cx - title.get_width() // 2, 18))
             weather = self.font_sm.render(f"Погода: {sim.weather.name_ru}", True, (115, 215, 255))
             surface.blit(weather, (cx - weather.get_width() // 2, 48))
-            hint = self.font_xs.render("Выберите модификатор клавишами 1–9, 0 или крестовиной геймпада", True, (215, 228, 244))
+            hint = self.font_xs.render("Три случайных варианта: выберите 1, 2, 3 или крестовиной геймпада", True, (215, 228, 244))
             surface.blit(hint, (cx - hint.get_width() // 2, 76))
 
-            col_w = (w - 64) // 2
-            row_h = max(31, min(44, (h - 300) // 5))
-            for i, mod in enumerate(mods):
-                col, row = divmod(i, 5)
-                x = 24 + col * (col_w + 16)
-                y = 105 + row * row_h
-                chosen = mod.id == selected
-                rect = pygame.Rect(x, y, col_w, row_h - 4)
-                pygame.draw.rect(surface, (38, 82, 118) if chosen else (30, 38, 53), rect, border_radius=3)
-                if chosen:
-                    pygame.draw.rect(surface, (255, 214, 78), rect, 2, border_radius=3)
-                label = f"[{(i + 1) % 10}] {mod.name_ru}"
-                text = self.font_xs.render(label, True, (255, 235, 170) if chosen else (205, 217, 232))
-                surface.blit(text, (x + 8, y + (row_h - text.get_height()) // 2 - 2))
+            if not options:
+                waiting = self.font_sm.render("Ожидание вариантов от сервера...", True, (180, 200, 220))
+                surface.blit(waiting, (cx - waiting.get_width() // 2, 155))
 
-            current = next((m for m in mods if m.id == selected), None)
-            detail_y = 105 + 5 * row_h + 8
-            if current:
-                for i, text in enumerate((current.name_ru, current.short_ru)):
-                    rendered = self.font_sm.render(text, True, (255, 220, 125) if i == 0 else (210, 225, 240))
-                    surface.blit(rendered, (cx - rendered.get_width() // 2, detail_y + i * 24))
+            card_w = min(960, w - 48)
+            card_x = (w - card_w) // 2
+            row_h = max(75, min(105, (h - 205) // 3))
+            for i, mod_id in enumerate(options):
+                mod = by_id.get(mod_id)
+                if mod is None:
+                    continue
+                y = 105 + i * row_h
+                chosen = mod_id == selected
+                rect = pygame.Rect(card_x, y, card_w, row_h - 7)
+                pygame.draw.rect(surface, (38, 82, 118) if chosen else (30, 38, 53), rect, border_radius=4)
+                if chosen:
+                    pygame.draw.rect(surface, (255, 214, 78), rect, 2, border_radius=4)
+                name = self.font_sm.render(f"[{i + 1}] {mod.name_ru}", True, (255, 235, 170) if chosen else (220, 231, 242))
+                desc = self.font_xs.render(mod.short_ru, True, (210, 225, 240))
+                # Keep long names/descriptions inside their card at small resolutions.
+                old_clip = surface.get_clip()
+                surface.set_clip(rect)
+                surface.blit(name, (card_x + 14, y + 10))
+                surface.blit(desc, (card_x + 14, y + 38))
+                surface.set_clip(old_clip)
+
             rdy_txt = ("ВЫ ГОТОВЫ — ожидание противника" if ready else
                        f"ENTER / R / A — готово | Автостарт: {max(0, int(sim.phase_timer))}с")
             ready_s = self.font_sm.render(rdy_txt, True, (95, 245, 130) if ready else (255, 210, 90))

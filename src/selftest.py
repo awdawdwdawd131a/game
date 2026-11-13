@@ -4,7 +4,7 @@ Tests all subsystems automatically on any PC (either inside the desktop GUI or v
 1. Repository integrity check (ensures `черешня.jpg` is untouched and valid)
 2. 3D Bridge, Fuel Truck & FPV Drone geometry + perspective renderer + anti-flicker bridge checks
 3. Weather rotation across all presets (verifies distinct weather every round + wind/grip physics)
-4. 10+10 selectable modifiers for BOTH roles, two bridges, EW immunity and ERA
+4. Random three-option drafts, modifiers for BOTH roles, bridges, EW immunity and ERA
 5. Anti-FPV ballistic combat verification (proves Fuel Truck shoots down incoming FPV with real 3D projectiles!)
 6. FPV Direct-Hit destruction verification (proves FPV warhead destroys the Fuel Truck!)
 7. Real TCP Socket 1v1 Multiplayer loopback test (spawns `GameServer` + 2 `GameClient`s on separate sockets)
@@ -120,31 +120,28 @@ def run_verification_suite(
 
     record("3. Смена погоды каждый раунд (9 погодных условий)", check_weather_rotation)
 
-    # 4. Check Expanded 10+10 Random Modifiers for BOTH roles
+    # 4. Check 15+15 modifiers and three offered choices per role
     def check_modifiers() -> str:
-        assert len(DRONE_MODIFIERS) >= 10 and len(TRUCK_MODIFIERS) >= 10, (
-            f"Ожидалось >= 10 модов на сторону, получено {len(DRONE_MODIFIERS)} + {len(TRUCK_MODIFIERS)}"
+        assert len(DRONE_MODIFIERS) >= 15 and len(TRUCK_MODIFIERS) >= 15, (
+            f"Ожидалось >= 15 модов на сторону, получено {len(DRONE_MODIFIERS)} + {len(TRUCK_MODIFIERS)}"
         )
         sim = WorldSimulation(seed=55)
 
-        # Verify random shuffled-bag issuance draws every modifier without immediate repeats
-        seen_d = [sim.drone_mod]
-        seen_t = [sim.truck_mod]
-        for _ in range(len(DRONE_MODIFIERS) - 1):
-            sim.round_number += 1
-            sim.start_modifier_draft(advance_weather=True)
-            assert sim.drone_mod != seen_d[-1], "Модификатор дрона повторился два раунда подряд!"
-            assert sim.truck_mod != seen_t[-1], "Модификатор бензовоза повторился два раунда подряд!"
-            seen_d.append(sim.drone_mod)
-            seen_t.append(sim.truck_mod)
-        assert len(set(seen_d)) == len(DRONE_MODIFIERS), "Не все моды дрона выпали в мешке!"
-        assert len(set(seen_t)) == len(TRUCK_MODIFIERS), "Не все моды бензовоза выпали в мешке!"
-
-        # Valid role-specific choices work; invalid or opponent IDs are ignored.
-        sim.step(1.0 / 60.0, DroneInput(pick_modifier="kevlar_frame"), TruckInput(pick_modifier="v12_biturbo"))
-        assert sim.drone_mod == "kevlar_frame" and sim.truck_mod == "v12_biturbo"
-        sim.step(1.0 / 60.0, DroneInput(pick_modifier="v12_biturbo"), TruckInput(pick_modifier="invalid"))
-        assert sim.drone_mod == "kevlar_frame" and sim.truck_mod == "v12_biturbo"
+        # Each role gets three distinct server-generated choices each round.
+        for _ in range(25):
+            assert len(sim.drone_draft_options) == len(set(sim.drone_draft_options)) == 3
+            assert len(sim.truck_draft_options) == len(set(sim.truck_draft_options)) == 3
+            sim.start_modifier_draft()
+        d_choice = sim.drone_draft_options[1]
+        t_choice = sim.truck_draft_options[2]
+        sim.step(1.0 / 60.0, DroneInput(pick_modifier=d_choice), TruckInput(pick_modifier=t_choice))
+        assert sim.drone_mod == d_choice and sim.truck_mod == t_choice
+        invalid_d = next(m.id for m in DRONE_MODIFIERS if m.id not in sim.drone_draft_options)
+        sim.step(1.0 / 60.0, DroneInput(pick_modifier=invalid_d), TruckInput(pick_modifier="invalid"))
+        assert sim.drone_mod == d_choice and sim.truck_mod == t_choice
+        copy = WorldSimulation(seed=100)
+        copy.apply_snapshot(sim.get_snapshot())
+        assert copy.drone_draft_options == sim.drone_draft_options and copy.truck_draft_options == sim.truck_draft_options
 
         # Both bridge routes have working physics, persistent snapshot and deck collision.
         sim.round_number = 2
@@ -194,7 +191,7 @@ def run_verification_suite(
             "(выбор, два моста, РЭБ, ДЗ, кевлар)"
         )
 
-    record("4. Выбор модификаторов (10+10) и оба моста", check_modifiers)
+    record("4. Три случайных модификатора и оба моста", check_modifiers)
 
     # 5. Check Fuel Truck Shooting Down Incoming FPV Drone with 3D Ballistics
     def check_shoot_down_fpv() -> str:
@@ -257,9 +254,12 @@ def run_verification_suite(
             assert ok1 and c_drone.role == "drone", f"Клиент 1 ошибка: {c_drone.error_msg}"
             assert ok2 and c_truck.role == "truck", f"Клиент 2 ошибка: {c_truck.error_msg}"
 
-            # Ready up over TCP sockets; server keeps its random modifiers authoritative
-            c_drone.send_drone_input(DroneInput(pick_modifier="fiber_optic", ready=True))
-            c_truck.send_truck_input(TruckInput(pick_modifier="twin_zu_turret", ready=True))
+            # Use the choices actually dealt by the authoritative server.
+            with srv._lock:
+                d_choice = srv.sim.drone_draft_options[1]
+                t_choice = srv.sim.truck_draft_options[2]
+            c_drone.send_drone_input(DroneInput(pick_modifier=d_choice, ready=True))
+            c_truck.send_truck_input(TruckInput(pick_modifier=t_choice, ready=True))
             c_drone.send_ping()
 
             deadline = time.perf_counter() + 2.5
@@ -278,7 +278,8 @@ def run_verification_suite(
             valid_d = {m.id for m in DRONE_MODIFIERS}
             valid_t = {m.id for m in TRUCK_MODIFIERS}
             assert snap_d["drone_mod"] in valid_d and snap_d["truck_mod"] in valid_t
-            assert snap_d["drone_mod"] == "fiber_optic" and snap_d["truck_mod"] == "twin_zu_turret"
+            assert snap_d["drone_mod"] == d_choice and snap_d["truck_mod"] == t_choice
+            assert d_choice in snap_d["drone_draft_options"] and t_choice in snap_d["truck_draft_options"]
 
             # Drive truck & fire ballistic projectiles over network
             z_before = snap_d["truck"]["pos"][2]
@@ -303,8 +304,9 @@ def run_verification_suite(
             pygame.init()
         ic = InputController()
         assert ic.acro_toggle is False, "FPV должен запускаться со стабилизацией!"
-        ic.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
-        assert ic.build_drone_input(1/60, False).pick_modifier == DRONE_MODIFIERS[9].id
+        ic.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3))
+        options = [m.id for m in DRONE_MODIFIERS[:3]]
+        assert ic.build_drone_input(1/60, False, options).pick_modifier == options[2]
         snaps = ic.get_joystick_Snapshot()
         assert apply_deadzone(0.05, 0.12) == 0.0
         assert abs(apply_deadzone(1.0, 0.12) - 1.0) < 1e-5
