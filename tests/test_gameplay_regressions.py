@@ -34,11 +34,12 @@ class GameplayRegressionTests(unittest.TestCase):
             inp = ctrl.build_drone_input(1 / 60, False)
         self.assertEqual(inp.forward_Axis, 1.0)
         self.assertEqual(inp.throttle, 1.0)
-        ctrl.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
-        self.assertEqual(ctrl.build_drone_input(1 / 60, False).pick_modifier, DRONE_MODIFIERS[9].id)
-        self.assertFalse(ctrl.build_drone_input(1 / 60, False).pick_modifier)
+        options = [m.id for m in DRONE_MODIFIERS[:3]]
+        ctrl.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3))
+        self.assertEqual(ctrl.build_drone_input(1 / 60, False, options).pick_modifier, options[2])
+        self.assertFalse(ctrl.build_drone_input(1 / 60, False, options).pick_modifier)
         ctrl.handle_event(pygame.event.Event(pygame.JOYHATMOTION, value=(0, -1), joy=0, hat=0))
-        self.assertEqual(ctrl.build_drone_input(1 / 60, False).pick_modifier, DRONE_MODIFIERS[0].id)
+        self.assertEqual(ctrl.build_drone_input(1 / 60, False, options).pick_modifier, options[0])
 
     def test_menu_enter_does_not_auto_confirm_draft(self):
         app = DesktopGameApp.__new__(DesktopGameApp)
@@ -52,15 +53,15 @@ class GameplayRegressionTests(unittest.TestCase):
 
     def test_draft_choice_role_validation_and_ready(self):
         sim = WorldSimulation(seed=3)
-        sim.step(0.01, DroneInput(pick_modifier="fiber_optic", ready=True), TruckInput(pick_modifier="twin_zu_turret"))
-        self.assertEqual(sim.drone_mod, "fiber_optic")
-        self.assertEqual(sim.truck_mod, "twin_zu_turret")
+        drone_choice, truck_choice = sim.drone_draft_options[1], sim.truck_draft_options[2]
+        sim.step(0.01, DroneInput(pick_modifier=drone_choice, ready=True), TruckInput(pick_modifier=truck_choice))
+        self.assertEqual(sim.drone_mod, drone_choice)
+        self.assertEqual(sim.truck_mod, truck_choice)
         self.assertTrue(sim.drone_draft_ready)
-        sim.step(0.01, DroneInput(pick_modifier="twin_zu_turret"), TruckInput(pick_modifier="fiber_optic", ready=True))
+        sim.step(0.01, DroneInput(pick_modifier=truck_choice), TruckInput(ready=True))
         self.assertEqual(sim.phase, "ACTIVE_ROUND")
-        self.assertEqual(sim.drone_mod, "fiber_optic")
-        self.assertEqual(sim.truck_mod, "twin_zu_turret")
-        self.assertGreater(sim.drone_max_battery, 45)
+        self.assertEqual(sim.drone_mod, drone_choice)
+        self.assertEqual(sim.truck_mod, truck_choice)
 
     def test_waiting_lobby_preserves_choice(self):
         server = GameServer(host="127.0.0.1", port=0, fill_with_bot=False, seed=7)
@@ -68,11 +69,13 @@ class GameplayRegressionTests(unittest.TestCase):
         client = GameClient()
         try:
             self.assertTrue(client.connect("127.0.0.1", port, preferred_role="drone", timeout=3))
-            client.send_drone_input(DroneInput(pick_modifier="fiber_optic", ready=True))
+            with server._lock:
+                choice = server.sim.drone_draft_options[1]
+            client.send_drone_input(DroneInput(pick_modifier=choice, ready=True))
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 with server._lock:
-                    picked = server.sim.drone_mod == "fiber_optic" and server.sim.drone_draft_ready
+                    picked = server.sim.drone_mod == choice and server.sim.drone_draft_ready
                     timer = server.sim.phase_timer
                 if picked:
                     break

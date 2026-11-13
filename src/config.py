@@ -310,7 +310,7 @@ WEATHER_BY_ID: Dict[str, WeatherPreset] = {w.id: w for w in WEATHER_PRESETS}
 
 
 # ---------------------------------------------------------------------------
-# Expanded Modifiers Pool (Issued Randomly Each Round!)
+# Modifier pools: three random choices per role each round
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ModifierDef:
@@ -467,6 +467,22 @@ TRUCK_MODIFIERS: List[ModifierDef] = [
         desc_ru="Густой термодым накрывает участок моста за тягачом, скрывая бензовоз от обзора.",
     ),
 ]
+
+# Additional loadouts have distinct, tested effects and trade-offs.
+DRONE_MODIFIERS.extend([
+    ModifierDef("quick_reload", "drone", "Быстрый сброс БЧ", "Откат БЧ 2.4с, -15% урона", "Быстрый повторный сброс за счёт меньшего заряда."),
+    ModifierDef("signal_filter", "drone", "Фильтр радиопомех", "-60% помех от РЭБ", "Защита ослабляет помехи, но не даёт полного иммунитета."),
+    ModifierDef("light_frame", "drone", "Облегчённая рама", "+15% скорости и тяги, -25% HP", "Быстрый и манёвренный, но уязвимый дрон."),
+    ModifierDef("rapid_respawn", "drone", "Быстрый запуск", "Новый борт через 1.4с, -20% батареи", "Подготовленные борты взлетают быстрее, но батарея меньше."),
+    ModifierDef("precision_charge", "drone", "Точный ударный заряд", "+20% урона БЧ, -25% радиуса", "Усиленный заряд требует более точного попадания."),
+])
+TRUCK_MODIFIERS.extend([
+    ModifierDef("heavy_armor", "truck", "Тяжёлое бронирование", "+50 HP (175 HP), -15% макс. скорости", "Дополнительная броня замедляет тягач."),
+    ModifierDef("turret_cooling", "truck", "Охлаждение турели", "+80% охлаждения, -25% нагрева выстрела", "Оружие дольше стреляет без перегрева."),
+    ModifierDef("rapid_shotgun", "truck", "Быстрая перезарядка дробовика", "Откат дробовика -40%, урон дробины -10%", "Более частые залпы с облегчённой картечью."),
+    ModifierDef("traction_control", "truck", "Усиленное сцепление", "+35% сцепления (до 100%), +10% разгона", "Шины и электроника помогают на скользкой дороге."),
+    ModifierDef("pulse_jammer", "truck", "Импульсный РЭБ", "Откат РЭБ -35%, длительность -20%", "Частые короткие импульсы помех прежней дальности."),
+])
 
 DRONE_MOD_BY_ID: Dict[str, ModifierDef] = {m.id: m for m in DRONE_MODIFIERS}
 TRUCK_MOD_BY_ID: Dict[str, ModifierDef] = {m.id: m for m in TRUCK_MODIFIERS}

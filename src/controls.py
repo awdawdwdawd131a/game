@@ -17,7 +17,6 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 
-from .config import DRONE_MODIFIERS, TRUCK_MODIFIERS
 from .math3d import clamp
 from .physics import DroneInput, TruckInput
 
@@ -231,7 +230,7 @@ class InputController:
             return
 
         if event.type == pygame.KEYDOWN:
-            number_keys = (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9, pygame.K_0)
+            number_keys = (pygame.K_1, pygame.K_2, pygame.K_3)
             if event.key in number_keys:
                 self._modifier_index = number_keys.index(event.key)
                 self._draft_cursor = self._modifier_index
@@ -256,7 +255,7 @@ class InputController:
                 self.acro_toggle = not self.acro_toggle
 
         elif event.type == pygame.JOYHATMOTION and event.value[1]:
-            self._draft_cursor = (self._draft_cursor - event.value[1]) % 10
+            self._draft_cursor = (self._draft_cursor - event.value[1]) % 3
             self._modifier_index = self._draft_cursor
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -383,7 +382,7 @@ class InputController:
             return clamp((raw + 1.0) * 0.5, 0.0, 1.0)
         return clamp(raw, 0.0, 1.0)
 
-    def build_drone_input(self, dt: float, mouse_captured: bool) -> DroneInput:
+    def build_drone_input(self, dt: float, mouse_captured: bool, modifier_options: Optional[List[str]] = None) -> DroneInput:
         keys = pygame.key.get_pressed()
         mx, my = pygame.mouse.get_rel() if mouse_captured else (0, 0)
         mbtns = pygame.mouse.get_pressed(3)
@@ -447,13 +446,13 @@ class InputController:
             boost=boost,
             detonate=self._one_detonate,
             acro_mode=self.acro_toggle,
-            pick_modifier=DRONE_MODIFIERS[self._modifier_index].id if self._modifier_index is not None else "",
+            pick_modifier=modifier_options[self._modifier_index] if modifier_options and self._modifier_index is not None and self._modifier_index < len(modifier_options) else "",
             ready=self._one_ready,
         )
         self._clear_latches()
         return inp
 
-    def build_truck_input(self, dt: float, mouse_captured: bool) -> TruckInput:
+    def build_truck_input(self, dt: float, mouse_captured: bool, modifier_options: Optional[List[str]] = None) -> TruckInput:
         keys = pygame.key.get_pressed()
         mx, my = pygame.mouse.get_rel() if mouse_captured else (0, 0)
         mbtns = pygame.mouse.get_pressed(3)
@@ -502,7 +501,7 @@ class InputController:
             fire_shotgun=self._one_truck_shotgun,
             trigger_ew=self._one_truck_ew,
             trigger_smoke=self._one_truck_smoke,
-            pick_modifier=TRUCK_MODIFIERS[self._modifier_index].id if self._modifier_index is not None else "",
+            pick_modifier=modifier_options[self._modifier_index] if modifier_options and self._modifier_index is not None and self._modifier_index < len(modifier_options) else "",
             ready=self._one_ready,
         )
         self._clear_latches()
