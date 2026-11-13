@@ -397,7 +397,8 @@ class GameServer:
                 if both_ready_to_sim:
                     self.sim.step(DT, d_in, t_in)
                 else:
-                    # Hold draft timer while waiting for 2nd PC player to connect
+                    # Keep selection and readiness while holding the countdown for player 2.
+                    self.sim.apply_draft_input(d_in, t_in)
                     self.sim.last_event_ru = "Ожидание подключения 2-го игрока по сети..."
 
                 tick_idx += 1

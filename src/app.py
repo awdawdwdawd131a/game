@@ -274,7 +274,10 @@ class DesktopGameApp:
         self._cleanup_network()
         self.my_role = role
         self.sim = WorldSimulation()
+        # Enter in the menu must not also confirm the new draft.
+        self.controls._clear_latches()
         self.state = "GAME_LOCAL"
+        self._last_game_phase = self.sim.phase
         self._set_mouse_capture(False)
 
     def _handle_net_setup_event(self, event: pygame.event.Event) -> None:
@@ -422,11 +425,10 @@ class DesktopGameApp:
     def _handle_gameplay_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                if self.mouse_captured:
-                    self._set_mouse_capture(False)
-                else:
-                    self._cleanup_network()
-                    self.state = "MENU"
+                # A single press always leaves a match, even with captured mouse.
+                self._set_mouse_capture(False)
+                self._cleanup_network()
+                self.state = "MENU"
             elif event.key == pygame.K_TAB:
                 self._set_mouse_capture(not self.mouse_captured)
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -543,9 +545,10 @@ class DesktopGameApp:
         if self.state == "GAME_LOCAL":
             if self.sim.phase != "ACTIVE_ROUND" and self.mouse_captured:
                 self._set_mouse_capture(False)
-            elif self.sim.phase == "ACTIVE_ROUND" and not self.mouse_captured:
-                # Auto-grab cursor when round goes live
+            elif self.sim.phase == "ACTIVE_ROUND" and getattr(self, "_last_game_phase", None) != "ACTIVE_ROUND":
+                # Capture only on transition, so TAB can release it.
                 self._set_mouse_capture(True)
+            self._last_game_phase = self.sim.phase
 
             if self.my_role == "drone":
                 d_in = self.controls.build_drone_input(dt, self.mouse_captured)
@@ -601,7 +604,10 @@ class DesktopGameApp:
             if res:
                 self.my_role = cli.role
                 self.sim = WorldSimulation()
+                # Do not carry the Enter used in the connection menu into the draft.
+                self.controls._clear_latches()
                 self.state = "GAME_NET"
+                self._last_game_phase = self.sim.phase
                 self.status_banner = ""
             else:
                 self.status_banner = cli.error_msg
@@ -683,8 +689,7 @@ class DesktopGameApp:
         ew_v = 0.0
         if active and self.sim.ew_active_timer > 0.0:
             if self.my_role == "drone":
-                dist = float(np.linalg.norm(self.sim.drone_pos - self.sim.truck_pos))
-                ew_v = max(0.0, 0.22 - dist / 320.0)
+                ew_v = 0.30 * self.sim.drone_jam_level
             else:
                 ew_v = 0.05
         if ew_v > 0.01:

@@ -626,6 +626,10 @@ def build_crimean_bridge_mesh(barriers: List[AABB]) -> Tuple[Mesh3D, List[AABB]]
     mb.add_box(-ROAD_HALF_WIDTH + 0.6, ROAD_DECK_Y + 5.5, fz, 1.2, 11.0, 1.2, (46, 185, 86), skip_bottom=True)
     mb.add_box(ROAD_HALF_WIDTH - 0.6, ROAD_DECK_Y + 5.5, fz, 1.2, 11.0, 1.2, (46, 185, 86), skip_bottom=True)
     mb.add_box(0.0, ROAD_DECK_Y + 10.6, fz, ROAD_HALF_WIDTH * 2.0, 1.5, 1.2, (40, 200, 92))
+    # Matching finish portal on the playable railway span.
+    for side in (-1.0, 1.0):
+        mb.add_box(RAIL_CENTER_X + side * (RAIL_HALF_WIDTH - 0.6), RAIL_DECK_Y + 5.5, fz, 1.0, 11.0, 1.2, (46, 185, 86), skip_bottom=True)
+    mb.add_box(RAIL_CENTER_X, RAIL_DECK_Y + 10.6, fz, RAIL_HALF_WIDTH * 2.0, 1.2, 1.2, (40, 200, 92))
     # Checkered finish line on asphalt (+Y single-sided decal)
     for k in range(-6, 6):
         c_chk = (245, 245, 245) if k % 2 == 0 else (30, 30, 30)

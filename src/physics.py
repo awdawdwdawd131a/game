@@ -1,12 +1,11 @@
 """
 Authoritative 3D Physics & Match Simulation for Crimean Bridge 1v1:
-- Match state machine: MODIFIER_DRAFT (Random Loadout Briefing) -> ACTIVE_ROUND -> ROUND_END -> MATCH_OVER
-- Dynamic weather rotation every round (guaranteed distinct consecutive presets)
-- Expanded 10+10 random modifiers issued per round via shuffled bags
+- Match state machine: MODIFIER_DRAFT -> ACTIVE_ROUND -> ROUND_END -> MATCH_OVER
+- Weather rotates without consecutive repeats; road and railway alternate each round
+- 10 modifiers per role selectable during the draft
 - Realistic 3D projectile ballistics (gravity drop, aerodynamic drag, truck velocity inheritance,
   continuous swept collision, ballistic lead solver)
-- Challenging quadcopter FPV flight dynamics (tilted rotor thrust vectoring, Acro rate-hold default,
-  angular inertia, real momentum/gravity, bank-turn coupling, wind & propwash turbulence)
+- Assisted FPV movement with momentum, wind, selectable camera leveling and EW interference
 """
 
 from __future__ import annotations
@@ -40,6 +39,7 @@ from .config import (
     MODIFIER_PICK_TIME,
     ROAD_DECK_Y,
     ROAD_HALF_WIDTH,
+    RAIL_CENTER_X, RAIL_DECK_Y, RAIL_HALF_WIDTH,
     ROUND_END_DELAY,
     ROUND_TIME_LIMIT,
     SHOTGUN_COOLDOWN,
@@ -92,8 +92,8 @@ class DroneInput:
     pitch_delta: float = 0.0     # radians look pitch delta this tick
     boost: bool = False          # sprint / nitro motors
     detonate: bool = False       # manual airburst / cluster drop trigger
-    acro_mode: bool = True       # True = Acro (manual rate hold), False = Angle (self-level assist)
-    pick_modifier: str = ""      # deprecated / unused in random-issue mode (kept for wire compatibility)
+    acro_mode: bool = False      # True = freer camera attitude, False = assisted leveling
+    pick_modifier: str = ""      # validated modifier ID chosen during the draft
     ready: bool = False
 
     def to_dict(self) -> dict:
@@ -115,7 +115,7 @@ class TruckInput:
     fire_shotgun: bool = False   # RMB / RB anti-drone buckshot blast
     trigger_ew: bool = False     # E / X button: activate EW Jammer (РЭБ)
     trigger_smoke: bool = False  # Q / Y button: deploy smoke screen
-    pick_modifier: str = ""      # deprecated / unused in random-issue mode (kept for wire compatibility)
+    pick_modifier: str = ""      # validated modifier ID chosen during the draft
     ready: bool = False
 
     def to_dict(self) -> dict:
@@ -183,6 +183,7 @@ class WorldSimulation:
 
         # Match progression
         self.phase: str = "MODIFIER_DRAFT"   # MODIFIER_DRAFT, ACTIVE_ROUND, ROUND_END, MATCH_OVER
+        self.bridge_route: str = "road"
         self.round_number: int = 1
         self.drone_score: int = 0
         self.truck_score: int = 0
@@ -252,7 +253,7 @@ class WorldSimulation:
         self.tracers: List[TracerFX] = []
         self.explosions: List[ExplosionFX] = []
         self.smokes: List[SmokeCloud] = []
-        self.last_event_ru: str = "Раунд 1: случайные модификаторы выданы!"
+        self.last_event_ru: str = "Раунд 1: выберите модификатор!"
 
         self._pick_next_weather()
         self._pick_next_modifiers()
@@ -276,6 +277,20 @@ class WorldSimulation:
                         tag="arch",
                     )
                 )
+        # Railway arch ribs and guardrails are physical, just like the road span.
+        for step in range(arch_steps):
+            u0 = -1.0 + 2.0 * step / arch_steps
+            u1 = -1.0 + 2.0 * (step + 1) / arch_steps
+            z0, z1 = u0 * 115.0, u1 * 115.0
+            y0 = RAIL_DECK_Y + (68.0 - RAIL_DECK_Y) * (1.0 - u0 * u0)
+            y1 = RAIL_DECK_Y + (68.0 - RAIL_DECK_Y) * (1.0 - u1 * u1)
+            for x in (RAIL_CENTER_X - RAIL_HALF_WIDTH - 0.8, RAIL_CENTER_X + RAIL_HALF_WIDTH + 0.8):
+                cols.append(AABB(
+                    min_pt=np.array([x - 1.1, min(y0, y1) - 1.1, min(z0, z1) - 1.1], dtype=np.float32),
+                    max_pt=np.array([x + 1.1, max(y0, y1) + 1.1, max(z0, z1) + 1.1], dtype=np.float32), tag="rail_arch"))
+        for x in (RAIL_CENTER_X - RAIL_HALF_WIDTH + 0.3, RAIL_CENTER_X + RAIL_HALF_WIDTH - 0.3):
+            cols.append(AABB(min_pt=np.array([x - 0.35, RAIL_DECK_Y, -750.0], dtype=np.float32),
+                             max_pt=np.array([x + 0.35, RAIL_DECK_Y + 1.6, 750.0], dtype=np.float32), tag="rail_guard"))
         return cols
 
     @property
@@ -323,6 +338,7 @@ class WorldSimulation:
         if advance_weather:
             self._pick_next_weather()
         self._pick_next_modifiers()
+        self.bridge_route = "road" if self.round_number % 2 else "rail"
         self.phase = "MODIFIER_DRAFT"
         self.phase_timer = MODIFIER_PICK_TIME
         self.drone_draft_ready = False
@@ -330,7 +346,7 @@ class WorldSimulation:
         self.round_winner = ""
         self.round_reason_ru = ""
         self._init_round_entities()
-        self.last_event_ru = f"Раунд {self.round_number} | Погода: {self.weather.name_ru} | Случайные моды выданы!"
+        self.last_event_ru = f"Раунд {self.round_number} | Погода: {self.weather.name_ru} | Выберите модификатор!"
 
     def _init_round_entities(self) -> None:
         self.projectiles.clear()
@@ -352,7 +368,9 @@ class WorldSimulation:
         self.truck_reactive_ready = self.truck_mod == "reactive_armor"
         self.truck_last_hit_timer = 99.0
 
-        self.truck_pos = np.array([3.2, ROAD_DECK_Y, BRIDGE_START_Z], dtype=np.float32)
+        route_x = RAIL_CENTER_X if self.bridge_route == "rail" else 3.2
+        route_y = RAIL_DECK_Y if self.bridge_route == "rail" else ROAD_DECK_Y
+        self.truck_pos = np.array([route_x, route_y, BRIDGE_START_Z], dtype=np.float32)
         self.truck_vel = np.zeros(3, dtype=np.float32)
         self.truck_speed = 14.0  # Rolling start onto the bridge
         self.truck_yaw = 0.0
@@ -396,8 +414,8 @@ class WorldSimulation:
 
         # Spawn just beyond the iconic white Crimean Bridge arches facing the oncoming truck
         spawn_z = clamp(float(self.truck_pos[2]) + 330.0, 95.0, BRIDGE_FINISH_Z + 40.0)
-        spawn_x = float(self.rng.choice([-8.5, 0.0, 8.5, 19.0]))
-        spawn_y = ROAD_DECK_Y + (28.0 if initial else 34.0)
+        spawn_x = (RAIL_CENTER_X if self.bridge_route == "rail" else 0.0) + float(self.rng.choice([-6.0, 0.0, 6.0]))
+        spawn_y = float(self.truck_pos[1]) + (28.0 if initial else 34.0)
         self.drone_pos = np.array([spawn_x, spawn_y, spawn_z], dtype=np.float32)
         self.drone_vel = np.array([0.0, 0.0, -14.0], dtype=np.float32)
         dx = float(self.truck_pos[0] - self.drone_pos[0])
@@ -409,7 +427,7 @@ class WorldSimulation:
         self.drone_pitch_rate = 0.0
         self.drone_roll_rate = 0.0
         self.drone_throttle_pct = 35.0
-        self.drone_acro = True
+        self.drone_acro = False
 
     def begin_active_round(self) -> None:
         self.phase = "ACTIVE_ROUND"
@@ -453,6 +471,21 @@ class WorldSimulation:
     # -----------------------------------------------------------------------
     # Main Simulation Step
     # -----------------------------------------------------------------------
+    def apply_draft_input(self, drone_in: DroneInput, truck_in: TruckInput) -> None:
+        """Accept role-specific selection/ready events, including while waiting in a lobby."""
+        if self.phase != "MODIFIER_DRAFT":
+            return
+        if isinstance(drone_in.pick_modifier, str) and drone_in.pick_modifier in {m.id for m in DRONE_MODIFIERS}:
+            self.drone_mod = drone_in.pick_modifier
+            self.drone_draft_ready = False
+        if isinstance(truck_in.pick_modifier, str) and truck_in.pick_modifier in {m.id for m in TRUCK_MODIFIERS}:
+            self.truck_mod = truck_in.pick_modifier
+            self.truck_draft_ready = False
+        if drone_in.ready:
+            self.drone_draft_ready = True
+        if truck_in.ready:
+            self.truck_draft_ready = True
+
     def step(self, dt: float, drone_in: DroneInput, truck_in: TruckInput) -> None:
         self.sim_time += dt
         self._tick_fx(dt)
@@ -464,11 +497,7 @@ class WorldSimulation:
                 self.lightning_flash = 1.0
 
         if self.phase == "MODIFIER_DRAFT":
-            # Modifiers are issued randomly per round; players confirm readiness
-            if drone_in.ready:
-                self.drone_draft_ready = True
-            if truck_in.ready:
-                self.truck_draft_ready = True
+            self.apply_draft_input(drone_in, truck_in)
 
             self.phase_timer -= dt
             if (self.drone_draft_ready and self.truck_draft_ready) or self.phase_timer <= 0.0:
@@ -543,11 +572,12 @@ class WorldSimulation:
         self.truck_vel[:] = (vx, 0.0, vz)
         self.truck_pos[0] += vx * dt
         self.truck_pos[2] += vz * dt
-        self.truck_pos[1] = ROAD_DECK_Y
+        route_x = RAIL_CENTER_X if self.bridge_route == "rail" else 0.0
+        self.truck_pos[1] = RAIL_DECK_Y if self.bridge_route == "rail" else ROAD_DECK_Y
 
-        guard_limit = ROAD_HALF_WIDTH - 2.1
-        if abs(float(self.truck_pos[0])) > guard_limit:
-            self.truck_pos[0] = clamp(float(self.truck_pos[0]), -guard_limit, guard_limit)
+        guard_limit = (RAIL_HALF_WIDTH if self.bridge_route == "rail" else ROAD_HALF_WIDTH) - 2.1
+        if abs(float(self.truck_pos[0]) - route_x) > guard_limit:
+            self.truck_pos[0] = clamp(float(self.truck_pos[0]), route_x - guard_limit, route_x + guard_limit)
             self.truck_speed *= 0.90
             self.truck_yaw *= 0.7
 
@@ -555,7 +585,7 @@ class WorldSimulation:
 
         tx, tz = float(self.truck_pos[0]), float(self.truck_pos[2])
         half_tw, half_tl = 1.55, 5.6
-        for b in self.barriers:
+        for b in (self.barriers if self.bridge_route == "road" else []):
             if (tx + half_tw > b.min_pt[0] and tx - half_tw < b.max_pt[0] and
                     tz + half_tl > b.min_pt[2] and tz - half_tl < b.max_pt[2]):
                 bcx = 0.5 * float(b.min_pt[0] + b.max_pt[0])
@@ -763,10 +793,9 @@ class WorldSimulation:
                 lz = -rel[0] * sy + rel[2] * cy
                 if abs(lx) <= 2.3 and abs(ly) <= 2.4 and abs(lz) <= 6.2:
                     hit_truck = True
-                hit_deck = (
-                    abs(float(p.pos[0])) <= ROAD_HALF_WIDTH + 0.5
-                    and float(p.pos[1]) <= ROAD_DECK_Y + 0.15
-                )
+                px, py = float(p.pos[0]), float(p.pos[1])
+                hit_deck = (abs(px) <= ROAD_HALF_WIDTH + 0.5 and py <= ROAD_DECK_Y + 0.15) or (
+                    abs(px - RAIL_CENTER_X) <= RAIL_HALF_WIDTH + 0.5 and py <= RAIL_DECK_Y + 0.15)
                 hit_sea = float(p.pos[1]) <= 0.2
                 if hit_truck or hit_deck or hit_sea:
                     self._explode_point(p.pos, radius=10.5, base_dmg=p.damage, reason_ru="Кассетный суббоеприпас")
@@ -802,7 +831,7 @@ class WorldSimulation:
                     continue
 
             # World stop (sea or roadway)
-            if float(p.pos[1]) <= 0.0 or (abs(float(p.pos[0])) <= ROAD_HALF_WIDTH and float(p.pos[1]) <= ROAD_DECK_Y and abs(float(p.pos[2])) <= 750.0):
+            if float(p.pos[1]) <= 0.0 or (abs(float(p.pos[2])) <= 750.0 and ((abs(float(p.pos[0])) <= ROAD_HALF_WIDTH and float(p.pos[1]) <= ROAD_DECK_Y) or (abs(float(p.pos[0]) - RAIL_CENTER_X) <= RAIL_HALF_WIDTH and float(p.pos[1]) <= RAIL_DECK_Y))):
                 continue
 
             survivors.append(p)
@@ -843,93 +872,37 @@ class WorldSimulation:
 
         # EW Jammer calculation
         dist_to_truck = float(np.linalg.norm(self.drone_pos - (self.truck_pos + np.array([0.0, 2.2, 0.0], dtype=np.float32))))
-        ew_rad = EW_JAMMER_RADIUS * (1.60 if self.truck_mod == "ew_kupol" else 1.0)
-        if not fiber and self.ew_active_timer > 0.0 and dist_to_truck < ew_rad:
-            jam_strength = 1.15 if self.truck_mod == "ew_kupol" else 1.0
-            self.drone_jam_level = clamp((1.0 - (dist_to_truck / ew_rad) * 0.70) * jam_strength, 0.28, 1.0)
-        elif not fiber and dist_to_truck < 30.0:
-            self.drone_jam_level = clamp((30.0 - dist_to_truck) / 45.0, 0.0, 0.42)
+        ew_rad = EW_JAMMER_RADIUS * (1.35 if self.truck_mod == "ew_kupol" else 1.0)
+        if fiber:
+            self.drone_jam_level = 0.0
+        elif self.ew_active_timer > 0.0 and dist_to_truck < ew_rad:
+            self.drone_jam_level = clamp(0.55 + 0.45 * (1.0 - dist_to_truck / ew_rad), 0.0, 1.0)
         else:
-            self.drone_jam_level = max(0.0, self.drone_jam_level - dt * 2.5)
+            self.drone_jam_level = max(0.0, self.drone_jam_level - dt * 4.0)
 
-        # Control jitter when jammed by EW
-        ctrl_mult = 1.0 - 0.58 * self.drone_jam_level
-        jam_yaw_glitch = math.sin(self.sim_time * 19.0) * 1.6 * self.drone_jam_level * dt if self.drone_jam_level > 0.30 else 0.0
-        jam_roll_glitch = math.cos(self.sim_time * 15.0) * 1.8 * self.drone_jam_level if self.drone_jam_level > 0.30 else 0.0
+        # Classic assisted FPV controls: W/S move in the camera direction,
+        # A/D strafe, Shift/Ctrl climb/descend; mouse aims. X toggles attitude assist.
+        ctrl_mult = 1.0 - 0.70 * self.drone_jam_level
+        jam_yaw = math.sin(self.sim_time * 19.0) * 1.5 * self.drone_jam_level * dt
+        jam_roll = math.cos(self.sim_time * 15.0) * 0.55 * self.drone_jam_level
+        self.drone_yaw = wrap_angle(self.drone_yaw + inp.yaw_delta * ctrl_mult + jam_yaw)
+        self.drone_pitch = clamp(self.drone_pitch + inp.pitch_delta * ctrl_mult, -1.25, 1.35)
+        self.drone_acro = bool(inp.acro_mode)
+        target_roll = clamp(-inp.strafe_axis * (0.95 if self.drone_acro else 0.68) + jam_roll, -1.2, 1.2)
+        self.drone_roll += (target_roll - self.drone_roll) * min(1.0, dt * 10.0)
+        if not self.drone_acro and abs(inp.pitch_delta) < 1e-4 and abs(inp.forward_Axis) < 0.05:
+            self.drone_pitch = move_toward(self.drone_pitch, 0.0, dt * 0.85)
 
-        # Harder Quadcopter Rotational Inertia & Acro Attitude Hold
-        acro = bool(inp.acro_mode)
-        self.drone_acro = acro
-        ang_resp = 21.0 if wind_gyro else 15.5
-
-        # Yaw & Pitch rates driven by mouse/stick + cyclic W/S forward tilt
-        safe_dt = max(dt, 1e-4)
-        target_yaw_rate = (inp.yaw_delta / safe_dt) * ctrl_mult
-        # W/S also nudges nose pitch down/up gently (+forward_Axis tilts nose down!)
-        target_pitch_rate = (inp.pitch_delta / safe_dt) * ctrl_mult + inp.forward_Axis * 0.55 * ctrl_mult
-        target_roll_rate = -inp.strafe_axis * (3.15 if acro else 2.65) * ctrl_mult + jam_roll_glitch
-
-        self.drone_yaw_rate += (target_yaw_rate - self.drone_yaw_rate) * min(1.0, dt * ang_resp)
-        self.drone_pitch_rate += (target_pitch_rate - self.drone_pitch_rate) * min(1.0, dt * ang_resp)
-        self.drone_roll_rate += (target_roll_rate - self.drone_roll_rate) * min(1.0, dt * (12.0 if acro else 10.0))
-
-        # Weather turbulence nudges drone attitude slightly (wind_gyro damps 75% of it)
-        turb_scale = (0.25 if wind_gyro else 1.0) * (w.gust_strength / 6.5)
-        gust_roll_torque = math.sin(self.sim_time * 3.1 + float(self.drone_pos[2]) * 0.05) * 0.38 * turb_scale * dt
-        gust_pitch_torque = math.cos(self.sim_time * 2.7) * 0.24 * turb_scale * dt
-
-        # Coordinated bank-to-yaw coupling when rolled
-        bank_yaw_drift = -math.sin(self.drone_roll) * 0.48 * dt
-
-        self.drone_yaw = wrap_angle(self.drone_yaw + self.drone_yaw_rate * dt + jam_yaw_glitch + bank_yaw_drift)
-        self.drone_pitch = clamp(self.drone_pitch + self.drone_pitch_rate * dt + gust_pitch_torque, -1.35, 1.38)
-
-        if acro:
-            # Acro Mode: NO self-leveling! Drone holds whatever roll & pitch angle you set!
-            self.drone_roll = clamp(self.drone_roll + self.drone_roll_rate * dt + gust_roll_torque, -1.48, 1.48)
-        else:
-            # Angle Assist: still uses real thrust vector & gravity, gently levels when sticks centered
-            self.drone_roll = clamp(self.drone_roll + self.drone_roll_rate * dt + gust_roll_torque, -1.15, 1.15)
-            if abs(inp.strafe_axis) < 0.06:
-                self.drone_roll = move_toward(self.drone_roll, 0.0, dt * 2.2)
-            if abs(inp.pitch_delta) < 1e-4 and abs(inp.forward_Axis) < 0.06:
-                self.drone_pitch = move_toward(self.drone_pitch, 0.0, dt * 1.15)
-
-        # True Tilted Rotor Thrust Vectoring (no magic auto-hover or sideways FPS strafe!)
-        speed_mult = (
-            (1.25 if sport else 1.0)
-            * (0.88 if heavy_pg else 1.0)
-            * (0.94 if fiber else 1.0)
-            * (0.95 if lipo else 1.0)
-        )
-        boost_mult = (1.38 if sport else 1.20) if inp.boost else 1.0
+        speed_mult = (1.25 if sport else 1.0) * (0.88 if heavy_pg else 1.0) * (0.94 if fiber else 1.0) * (0.95 if lipo else 1.0)
+        boost_mult = (1.34 if sport else 1.18) if inp.boost else 1.0
         max_spd = DRONE_MAX_SPEED * speed_mult * boost_mult
         thrust_mag = DRONE_THRUST * speed_mult * boost_mult
-
-        rot = euler_to_matrix(self.drone_yaw, self.drone_pitch, self.drone_roll)
-        # Camera uptilt ~20 deg: when camera looks flat at horizon, frame + rotors tilt forward 0.36
-        tilt_fwd = 0.36 + inp.forward_Axis * 0.42 + (0.12 if inp.boost else 0.0)
-        local_thrust = np.array([0.0, 1.0, tilt_fwd], dtype=np.float32)
-        local_thrust /= max(float(np.linalg.norm(local_thrust)), 1e-6)
-        thrust_dir = rot @ local_thrust
-
-        # Collective motor throttle: neutral is only ~64% of gravity -> pilot MUST manage throttle & pitch!
-        hover_def = DRONE_GRAVITY * 0.64
-        if inp.throttle >= 0.0:
-            motor_accel = hover_def + inp.throttle * (thrust_mag - hover_def)
-        else:
-            motor_accel = max(DRONE_GRAVITY * 0.14, hover_def + inp.throttle * (hover_def * 0.82))
-        if abs(inp.forward_Axis) > 0.05:
-            # Slight cyclic throttle compensation when pressing W/S
-            motor_accel += abs(inp.forward_Axis) * DRONE_GRAVITY * 0.30
-        if inp.boost:
-            motor_accel *= 1.16
-        motor_accel = clamp(motor_accel, DRONE_GRAVITY * 0.12, thrust_mag)
-
-        self.drone_throttle_pct = clamp((motor_accel / max(thrust_mag, 1.0)) * 100.0, 4.0, 100.0)
-
-        accel = thrust_dir * motor_accel
-        accel[1] -= DRONE_GRAVITY
+        fwd = forward_from_angles(self.drone_yaw, self.drone_pitch)
+        right = np.array([math.cos(self.drone_yaw), 0.0, -math.sin(self.drone_yaw)], dtype=np.float32)
+        accel = np.array([0.0, DRONE_GRAVITY * 0.96 + inp.throttle * thrust_mag * 0.72 * ctrl_mult - DRONE_GRAVITY, 0.0], dtype=np.float32)
+        accel += fwd * (inp.forward_Axis * thrust_mag * 1.08 * ctrl_mult + (0.35 * thrust_mag if inp.boost else 0.0))
+        accel += right * (inp.strafe_axis * thrust_mag * 0.68 * ctrl_mult)
+        self.drone_throttle_pct = clamp(50.0 + inp.throttle * 50.0, 0.0, 100.0)
 
         # Dynamic weather wind + gusts (wind_gyro reduces wind push by 75%!)
         wind_mult = 0.25 if wind_gyro else 1.0
@@ -988,8 +961,10 @@ class WorldSimulation:
             self._destroy_drone_in_air("FPV дрон упал в воды Керченского пролива!")
             return
 
-        if abs(dx) <= ROAD_HALF_WIDTH + 0.6 and abs(dz) <= 800.0:
-            if ROAD_DECK_Y - 1.8 <= dy <= ROAD_DECK_Y + 0.38:
+        on_road = abs(dx) <= ROAD_HALF_WIDTH + 0.6 and ROAD_DECK_Y - 1.8 <= dy <= ROAD_DECK_Y + 0.38
+        on_rail = abs(dx - RAIL_CENTER_X) <= RAIL_HALF_WIDTH + 0.6 and RAIL_DECK_Y - 2.0 <= dy <= RAIL_DECK_Y + 0.38
+        if abs(dz) <= 750.0:
+            if on_road or on_rail:
                 self._detonate_warhead("FPV разбился о полотно моста!")
                 return
 
@@ -1171,6 +1146,7 @@ class WorldSimulation:
         return {
             "phase": self.phase,
             "round_number": self.round_number,
+            "bridge_route": self.bridge_route,
             "drone_score": self.drone_score,
             "truck_score": self.truck_score,
             "phase_timer": round(self.phase_timer, 2),
@@ -1247,6 +1223,7 @@ class WorldSimulation:
     def apply_snapshot(self, snap: dict) -> None:
         self.phase = snap["phase"]
         self.round_number = snap["round_number"]
+        self.bridge_route = snap.get("bridge_route", "road")
         self.drone_score = snap["drone_score"]
         self.truck_score = snap["truck_score"]
         self.phase_timer = snap["phase_timer"]

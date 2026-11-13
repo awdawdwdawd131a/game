@@ -3,8 +3,8 @@ Built-in Verification & Diagnostic Mode ("Проверочный режим"):
 Tests all subsystems automatically on any PC (either inside the desktop GUI or via `--self-test` CLI):
 1. Repository integrity check (ensures `черешня.jpg` is untouched and valid)
 2. 3D Bridge, Fuel Truck & FPV Drone geometry + perspective renderer + anti-flicker bridge checks
-3. Weather rotation check across 6 consecutive rounds (verifies distinct weather every round + wind/grip physics)
-4. Expanded 10+10 random modifiers verification for BOTH roles (shuffled bags, EW immunity, ERA, cluster, etc.)
+3. Weather rotation across all presets (verifies distinct weather every round + wind/grip physics)
+4. 10+10 selectable modifiers for BOTH roles, two bridges, EW immunity and ERA
 5. Anti-FPV ballistic combat verification (proves Fuel Truck shoots down incoming FPV with real 3D projectiles!)
 6. FPV Direct-Hit destruction verification (proves FPV warhead destroys the Fuel Truck!)
 7. Real TCP Socket 1v1 Multiplayer loopback test (spawns `GameServer` + 2 `GameClient`s on separate sockets)
@@ -118,7 +118,7 @@ def run_verification_suite(
         assert unique_cnt == len(WEATHER_PRESETS), f"Ожидалось {len(WEATHER_PRESETS)} разных погод, получено {unique_cnt}"
         return f"Все {unique_cnt} погодных режимов сменяются каждый раунд без повторов"
 
-    record("3. Смена погоды каждый раунд (6 погодных условий)", check_weather_rotation)
+    record("3. Смена погоды каждый раунд (9 погодных условий)", check_weather_rotation)
 
     # 4. Check Expanded 10+10 Random Modifiers for BOTH roles
     def check_modifiers() -> str:
@@ -140,11 +140,25 @@ def run_verification_suite(
         assert len(set(seen_d)) == len(DRONE_MODIFIERS), "Не все моды дрона выпали в мешке!"
         assert len(set(seen_t)) == len(TRUCK_MODIFIERS), "Не все моды бензовоза выпали в мешке!"
 
-        # Verify manual pick_modifier input cannot override server/random issuance
-        before_d = sim.drone_mod
-        before_t = sim.truck_mod
+        # Valid role-specific choices work; invalid or opponent IDs are ignored.
         sim.step(1.0 / 60.0, DroneInput(pick_modifier="kevlar_frame"), TruckInput(pick_modifier="v12_biturbo"))
-        assert sim.drone_mod == before_d and sim.truck_mod == before_t, "Модификаторы не должны выбираться вручную!"
+        assert sim.drone_mod == "kevlar_frame" and sim.truck_mod == "v12_biturbo"
+        sim.step(1.0 / 60.0, DroneInput(pick_modifier="v12_biturbo"), TruckInput(pick_modifier="invalid"))
+        assert sim.drone_mod == "kevlar_frame" and sim.truck_mod == "v12_biturbo"
+
+        # Both bridge routes have working physics, persistent snapshot and deck collision.
+        sim.round_number = 2
+        sim.start_modifier_draft()
+        assert sim.bridge_route == "rail" and abs(float(sim.truck_pos[0]) - 28.0) < 0.1
+        clone = WorldSimulation(seed=12)
+        clone.apply_snapshot(sim.get_snapshot())
+        assert clone.bridge_route == "rail"
+        sim.begin_active_round()
+        assert float(sim.truck_pos[1]) == 22.0
+        sim.drone_pos[:] = np.array([28.0, 22.2, 200.0], dtype=np.float32)
+        sim.drone_vel[:] = 0.0
+        sim.step(1.0 / 60.0, DroneInput(), TruckInput())
+        assert not sim.drone_alive, "Железнодорожное полотно должно иметь столкновения"
 
         # Fiber optic immunity to EW jammer
         sim.drone_mod = "fiber_optic"
@@ -177,10 +191,10 @@ def run_verification_suite(
         assert sim.drone_lives_left == 4 and sim.drone_max_hp > 55.0
         return (
             f"Проверены {len(DRONE_MODIFIERS)} модов FPV + {len(TRUCK_MODIFIERS)} модов Бензовоза "
-            "(рандом без повторов, РЭБ, ДЗ, кевлар)"
+            "(выбор, два моста, РЭБ, ДЗ, кевлар)"
         )
 
-    record("4. Случайные модификаторы (10+10) для обоих игроков", check_modifiers)
+    record("4. Выбор модификаторов (10+10) и оба моста", check_modifiers)
 
     # 5. Check Fuel Truck Shooting Down Incoming FPV Drone with 3D Ballistics
     def check_shoot_down_fpv() -> str:
@@ -244,8 +258,8 @@ def run_verification_suite(
             assert ok2 and c_truck.role == "truck", f"Клиент 2 ошибка: {c_truck.error_msg}"
 
             # Ready up over TCP sockets; server keeps its random modifiers authoritative
-            c_drone.send_drone_input(DroneInput(ready=True))
-            c_truck.send_truck_input(TruckInput(ready=True))
+            c_drone.send_drone_input(DroneInput(pick_modifier="fiber_optic", ready=True))
+            c_truck.send_truck_input(TruckInput(pick_modifier="twin_zu_turret", ready=True))
             c_drone.send_ping()
 
             deadline = time.perf_counter() + 2.5
@@ -264,6 +278,7 @@ def run_verification_suite(
             valid_d = {m.id for m in DRONE_MODIFIERS}
             valid_t = {m.id for m in TRUCK_MODIFIERS}
             assert snap_d["drone_mod"] in valid_d and snap_d["truck_mod"] in valid_t
+            assert snap_d["drone_mod"] == "fiber_optic" and snap_d["truck_mod"] == "twin_zu_turret"
 
             # Drive truck & fire ballistic projectiles over network
             z_before = snap_d["truck"]["pos"][2]
@@ -287,7 +302,9 @@ def run_verification_suite(
         if not pygame.get_init():
             pygame.init()
         ic = InputController()
-        assert ic.acro_toggle is True, "Режим FPV по умолчанию должен быть Acro!"
+        assert ic.acro_toggle is False, "FPV должен запускаться со стабилизацией!"
+        ic.handle_event(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+        assert ic.build_drone_input(1/60, False).pick_modifier == DRONE_MODIFIERS[9].id
         snaps = ic.get_joystick_Snapshot()
         assert apply_deadzone(0.05, 0.12) == 0.0
         assert abs(apply_deadzone(1.0, 0.12) - 1.0) < 1e-5
@@ -295,7 +312,7 @@ def run_verification_suite(
         t_inp = ic.build_truck_input(1 / 60.0, mouse_captured=False)
         assert isinstance(d_inp, DroneInput) and isinstance(t_inp, TruckInput)
         joy_info = f"подключено устройств: {len(snaps)}" if snaps else "подсистема SDL2 Joystick активна (ожидание геймпада/аппаратуры)"
-        return f"Gamepad + Radiomaster Mode 2 + Acro готовы ({joy_info})"
+        return f"Gamepad + Radiomaster Mode 2 + стабилизация готовы ({joy_info})"
 
     record("8. Поддержка джойстиков, геймпадов и FPV-аппаратуры", check_joystick_support)
 
@@ -339,7 +356,7 @@ def run_verification_suite(
         assert float(np.linalg.norm(sim2.projectiles[0].vel)) < spd0, "Сопротивление воздуха должно замедлять пулю!"
         assert sim2.turret_lock < 0.35, "Без захвата цели турель не должна набирать захват!"
 
-        # Acro quadcopter physics: neutral throttle cannot magically hover; roll tilts thrust vector
+        # Assisted flight: strafe moves laterally, with visible roll.
         sim3 = WorldSimulation(seed=4244)
         sim3.begin_active_round()
         sim3.drone_vel[:] = 0.0
@@ -347,7 +364,7 @@ def run_verification_suite(
         for _ in range(30):
             sim3.step(1.0 / 60.0, DroneInput(throttle=0.0, strafe_axis=0.8, acro_mode=True), TruckInput())
         assert abs(sim3.drone_roll) > 0.35, "В режиме Акро крен должен удерживаться без автовыравнивания!"
-        assert float(sim3.drone_vel[1]) < -1.0, "При нейтральном газе дрон должен снижаться под действием гравитации!"
+        assert abs(float(sim3.drone_vel[0])) > 1.0, "Клавиши влево/вправо должны перемещать FPV вбок!"
 
         return (
             "Подрыв БЧ, 3D-баллистика пуль (гравитация + сопротивление воздуха), "

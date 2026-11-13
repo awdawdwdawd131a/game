@@ -114,6 +114,15 @@ class SoundManager:
             data = self._read_wav_mono(os.path.join(self._assets_dir, fname))
             if data is None or data.size < 16:
                 continue
+            # Revoice the existing CC0 recordings with a quieter low-frequency
+            # layer, without introducing unlicensed assets or external downloads.
+            if name in ("turret", "shotgun"):
+                layer_name = "blast_small.wav" if name == "turret" else "explosion_far.wav"
+                layer = self._read_wav_mono(os.path.join(self._assets_dir, layer_name))
+                if layer is not None and layer.size:
+                    data = data.copy()
+                    n = min(data.size, layer.size)
+                    data[:n] = np.clip(data[:n] * 0.83 + layer[:n] * 0.17, -1.0, 1.0)
             base = self._make_sound(data, 1.0)
             self._sounds[name] = base
             # три варианта тона: -6%, базовый, +6%
@@ -179,8 +188,8 @@ class SoundManager:
         # 2. Визг моторов FPV (высокая частота + амплитудная модуляция)
         n = sr * 1
         t = np.arange(n) / sr
-        rotor = np.sin(2 * np.pi * 1180 * t) * 0.35 + np.sin(2 * np.pi * 2360 * t) * 0.18
-        rotor *= 0.7 + 0.3 * np.sin(2 * np.pi * 22 * t)
+        rotor = np.sin(2 * np.pi * 520 * t) * 0.28 + np.sin(2 * np.pi * 1040 * t) * 0.15
+        rotor *= 0.78 + 0.22 * np.sin(2 * np.pi * 18 * t)
         rotor += rng.normal(0, 0.05, n)
         self._loop_sounds["rotor"] = self._make_sound(fade_loop(rotor), 0.22)
 
@@ -234,7 +243,9 @@ class SoundManager:
                 if far_name in self._sounds and distance > 55.0:
                     snd = self._sounds[far_name]
                 gain *= 1.0 / (1.0 + distance / 55.0)
-            variants = self._variants.get(name)
+            # Use the actual near/far sample for pitch variations.
+            variant_name = far_name if distance is not None and distance > 55.0 and far_name in self._sounds else name
+            variants = self._variants.get(variant_name)
             if variants:
                 snd = variants[self._rng.randrange(len(variants))]
             snd.set_volume(float(max(0.0, min(1.0, gain))))
