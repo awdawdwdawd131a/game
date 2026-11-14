@@ -620,6 +620,7 @@ class BoreTunnel:
             return
 
         try:
+            data_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             if not _send_bore_message(data_sock, {"Accept": conn_id}):
                 raise OSError("не удалось отправить Accept")
         except OSError as exc:
@@ -631,16 +632,9 @@ class BoreTunnel:
                     pass
             return
 
-        # Данные, которые сервер успел прислать вместе с Accept.
-        try:
-            data_sock.settimeout(0.3)
-            chunk = data_sock.recv(65536)
-            if chunk:
-                local.sendall(chunk)
-        except OSError:
-            pass
-
-        # Возвращаем блокирующий режим: иначе перекачка оборвётся при простое.
+        # Перекачка сразу прочитает любые данные, уже пришедшие после Accept.
+        # Не ждём предварительный recv с таймаутом: ответ сервера игры тоже
+        # должен идти параллельно входящим данным.
         data_sock.settimeout(None)
         local.settimeout(None)
 
@@ -659,6 +653,14 @@ class BoreTunnel:
                     pass
                 return
             b = local
+
+        # Small, frequent game frames must not wait for Nagle/delayed ACK on
+        # either hop of the relay (including the legacy path).
+        for sock in (a, b):
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
 
         def _copy(src: socket.socket, dst: socket.socket) -> None:
             try:
