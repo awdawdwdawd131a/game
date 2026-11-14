@@ -914,6 +914,11 @@ class DesktopGameApp:
             proj = self.renderer.render_world(self.screen, self.sim, cam, hide_own_drone=False)
             self.renderer.draw_truck_hud(self.screen, self.sim, proj)
 
+        fps = self.clock.get_fps()
+        perf_text = f"FPS: {fps:.0f} | 3D: {self.renderer.render_scale * 100:.0f}%" if fps > 0 else f"FPS: -- | 3D: {self.renderer.render_scale * 100:.0f}%"
+        perf_label = self.renderer.font_xs.render(perf_text, True, (150, 220, 255))
+        self.screen.blit(perf_label, (self.screen.get_width() - perf_label.get_width() - 16, 102))
+
         net_info = ""
         if self.state == "GAME_NET" and self.net_client is not None:
             roles_str = ", ".join(self.net_client.online_roles) if self.net_client.online_roles else self.my_role

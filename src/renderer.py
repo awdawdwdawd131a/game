@@ -466,7 +466,9 @@ class SceneRenderer3D:
         sw_q = max(32, min(480, ((sw + 15) // 16) * 16))
         sh_q = max(16, ((sh + 7) // 8) * 8)
         cq = (int(color[0]) // 32, int(color[1]) // 32, int(color[2]) // 32)
-        aq = max(1, min(255, int(alpha)))
+        # Quantise opacity too: a moving camera otherwise creates hundreds of
+        # almost identical sprites and repeatedly flushes the whole cache.
+        aq = max(16, min(255, ((int(alpha) + 8) // 16) * 16))
         variant = int(variant) % len(self._cloud_sprites)
         key = (sw_q, sh_q, cq[0], cq[1], cq[2], aq, variant)
         cached = self._cloud_cache.get(key)
@@ -603,6 +605,9 @@ class SceneRenderer3D:
         картинка мягче. HUD и прицел рисуются поверх в полном разрешении.
         """
         self._render_scale_target = max(0.5, min(1.0, float(scale)))
+        # Honour the manual limit immediately, rather than taking minutes at
+        # single-digit FPS to step down once every 30 frames.
+        self.render_scale = min(self.render_scale, self._render_scale_target)
 
     def _update_render_scale(self, frame_ms: float) -> None:
         """
@@ -620,9 +625,11 @@ class SceneRenderer3D:
         target = self._render_scale_target
         avg = self._frame_ms_avg
         if avg > 26.0 and self.render_scale > 0.5:
-            # Не укладываемся - уменьшаем разрешение мира
-            self.render_scale = max(0.5, self.render_scale - 0.1)
-            self._scale_cooldown = 30
+            # Adapt quickly when performance is extremely poor; normal
+            # fluctuations still use a longer cooldown to avoid breathing.
+            severe = avg > 60.0
+            self.render_scale = max(0.5, self.render_scale - (0.2 if severe else 0.1))
+            self._scale_cooldown = 5 if severe else 30
         elif avg < 15.0 and self.render_scale < target:
             # Есть запас - возвращаем качество
             self.render_scale = min(target, self.render_scale + 0.1)
@@ -1151,7 +1158,9 @@ class SceneRenderer3D:
                 ],
                 dtype=np.float32,
             )
-            rows_g = 64
+            # Adjacent rows often map to the same pixel; 32 gives the same
+            # moving reflection at a fraction of the Python/NumPy overhead.
+            rows_g = 32
             for i in range(rows_g):
                 frac = i / rows_g
                 yy = int(sy_h_b + (bh - sy_h_b) * (frac ** 1.7))

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from typing import Dict, Optional, Tuple
+from collections import deque
 
 from .bot_ai import BotDroneController, BotTruckController
 from .config import DEFAULT_PORT, DT, TICK_RATE
@@ -23,13 +24,81 @@ HEADER_STRUCT = struct.Struct("!I")
 MAX_PACKET_BYTES = 256 * 1024
 
 
+def encode_packet(payload: dict) -> bytes:
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return HEADER_STRUCT.pack(len(raw)) + raw
+
+
 def send_packet(sock: socket.socket, payload: dict) -> bool:
     try:
-        raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        sock.sendall(HEADER_STRUCT.pack(len(raw)) + raw)
+        sock.sendall(encode_packet(payload))
         return True
     except OSError:
         return False
+
+
+class _ServerPeer:
+    """One writer per socket; replace obsolete snapshots instead of queuing them.
+
+    A blocked connection never holds the simulation lock or delays the other
+    player. Control packets (welcome/pong) precede the next snapshot.
+    """
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self._cv = threading.Condition()
+        self._control = deque()
+        self._state: Optional[bytes] = None
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="GameServerSend")
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def control(self, packet: dict) -> None:
+        with self._cv:
+            if self._running:
+                # A peer has at most one outstanding ping during normal play.
+                # Bound abusive ping traffic rather than growing memory forever.
+                if len(self._control) < 32:
+                    self._control.append(encode_packet(packet))
+                    self._cv.notify()
+
+    def state(self, frame: bytes) -> None:
+        with self._cv:
+            if self._running:
+                self._state = frame
+                self._cv.notify()
+
+    def close(self) -> None:
+        with self._cv:
+            self._running = False
+            self._cv.notify_all()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def _run(self) -> None:
+        try:
+            while True:
+                with self._cv:
+                    while self._running and not self._control and self._state is None:
+                        self._cv.wait()
+                    if not self._running:
+                        return
+                    if self._control:
+                        frame = self._control.popleft()
+                    else:
+                        frame, self._state = self._state, None
+                self.sock.sendall(frame)
+        except OSError:
+            pass
+        finally:
+            self.close()
 
 
 def recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
@@ -167,6 +236,7 @@ class GameServer:
 
         self._lock = threading.Lock()
         self._clients: Dict[str, socket.socket] = {}  # role ("drone" | "truck") -> socket
+        self._peers: Dict[str, _ServerPeer] = {}
         self._drone_input = DroneInput()
         self._truck_input = TruckInput()
         self._drone_one_shots = {"detonate": False, "ready": False, "pick_modifier": ""}
@@ -217,11 +287,9 @@ class GameServer:
             except OSError:
                 pass
         with self._lock:
-            for s in list(self._clients.values()):
-                try:
-                    s.close()
-                except OSError:
-                    pass
+            for peer in list(self._peers.values()):
+                peer.close()
+            self._peers.clear()
             self._clients.clear()
 
     def connected_roles(self) -> Tuple[bool, bool]:
@@ -251,9 +319,12 @@ class GameServer:
 
         preferred = hello.get("preferred_role", "auto")
         assigned_role: Optional[str] = None
+        peer = _ServerPeer(sock)
 
         with self._lock:
-            if preferred in ("drone", "truck") and preferred not in self._clients:
+            if not self._running:
+                pass
+            elif preferred in ("drone", "truck") and preferred not in self._clients:
                 assigned_role = preferred
             elif "drone" not in self._clients:
                 assigned_role = "drone"
@@ -262,6 +333,9 @@ class GameServer:
 
             if assigned_role is not None:
                 self._clients[assigned_role] = sock
+                self._peers[assigned_role] = peer
+                # Queue welcome before the sim can publish any states.
+                peer.control({"type": "welcome", "role": assigned_role, "server_tick_rate": TICK_RATE})
                 # Reset match cleanly when the second human joins!
                 if len(self._clients) == 2:
                     self.sim.reset_full_match()
@@ -272,14 +346,7 @@ class GameServer:
             return
 
         sock.settimeout(None)
-        send_packet(
-            sock,
-            {
-                "type": "welcome",
-                "role": assigned_role,
-                "server_tick_rate": TICK_RATE,
-            },
-        )
+        peer.start()
 
         try:
             while self._running:
@@ -317,15 +384,13 @@ class GameServer:
                                 self._truck_one_shots["pick_modifier"] = tin.pick_modifier
                             self._truck_input = tin
                 elif ptype == "ping":
-                    send_packet(sock, {"type": "pong", "t": pkt.get("t", 0.0)})
+                    peer.control({"type": "pong", "t": pkt.get("t", 0.0)})
         finally:
             with self._lock:
                 if self._clients.get(assigned_role) is sock:
                     del self._clients[assigned_role]
-            try:
-                sock.close()
-            except OSError:
-                pass
+                    self._peers.pop(assigned_role, None)
+            peer.close()
 
     def _sim_loop(self) -> None:
         next_tick = time.perf_counter()
@@ -409,16 +474,84 @@ class GameServer:
                         "players": list(self._clients.keys()),
                         "snap": self.sim.get_snapshot(),
                     }
-                    dead = []
-                    for r, csock in self._clients.items():
-                        if not send_packet(csock, snap_pkt):
-                            dead.append(r)
-                    for r in dead:
-                        try:
-                            self._clients[r].close()
-                        except OSError:
-                            pass
-                        del self._clients[r]
+                    frame = encode_packet(snap_pkt)
+                    for peer in self._peers.values():
+                        peer.state(frame)
+
+
+class _ClientSender:
+    """Send on a worker, coalescing continuous controls without losing pulses."""
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self._cv = threading.Condition()
+        self._running = True
+        self._pending: Optional[dict] = None
+        self._ping_requested = False
+        self._thread = threading.Thread(target=self._run, daemon=True, name="GameClientSend")
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def input(self, data: dict) -> None:
+        with self._cv:
+            if not self._running:
+                return
+            old = self._pending
+            if old is not None:
+                for key in ("yaw_delta", "pitch_delta", "aim_yaw_delta", "aim_pitch_delta"):
+                    if key in data:
+                        data[key] += old.get(key, 0.0)
+                for key in ("detonate", "ready", "fire_shotgun", "trigger_ew", "trigger_smoke"):
+                    if key in data:
+                        data[key] = data[key] or old.get(key, False)
+                if not data.get("pick_modifier"):
+                    data["pick_modifier"] = old.get("pick_modifier", "")
+            self._pending = data
+            self._cv.notify()
+
+    def ping(self) -> None:
+        with self._cv:
+            if self._running:
+                self._ping_requested = True
+                self._cv.notify()
+
+    def close(self) -> None:
+        with self._cv:
+            self._running = False
+            self._cv.notify_all()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def _run(self) -> None:
+        next_ping = time.perf_counter() + 1.5
+        try:
+            while True:
+                with self._cv:
+                    while self._running and self._pending is None and not self._ping_requested:
+                        delay = next_ping - time.perf_counter()
+                        if delay <= 0:
+                            break
+                        self._cv.wait(delay)
+                    if not self._running:
+                        return
+                    now = time.perf_counter()
+                    if self._ping_requested or now >= next_ping:
+                        self._ping_requested = False
+                        next_ping = now + 1.5
+                        packet = {"type": "ping", "t": now}
+                    else:
+                        packet = {"type": "input", "data": self._pending}
+                        self._pending = None
+                if not send_packet(self.sock, packet):
+                    return
+        finally:
+            self.close()
 
 
 class GameClient:
@@ -436,6 +569,7 @@ class GameClient:
         self._latest_snap: Optional[dict] = None
         self._running = False
         self._recv_thread: Optional[threading.Thread] = None
+        self._sender: Optional[_ClientSender] = None
         # Состояние неблокирующего подключения
         self.connecting: bool = False
         self._connect_thread: Optional[threading.Thread] = None
@@ -531,7 +665,9 @@ class GameClient:
             self.role = resp["role"]
             self.connected = True
             self._running = True
-            self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True, name="GameClientRecv")
+            self._sender = _ClientSender(s)
+            self._sender.start()
+            self._recv_thread = threading.Thread(target=self._recv_loop, args=(s,), daemon=True, name="GameClientRecv")
             self._recv_thread.start()
             return True
         except socket.timeout:
@@ -547,12 +683,22 @@ class GameClient:
     def disconnect(self) -> None:
         self._running = False
         self.connected = False
-        if self.sock is not None:
+        sender, self._sender = self._sender, None
+        sock, self.sock = self.sock, None
+        if sender is not None:
+            sender.close()
+        elif sock is not None:
             try:
-                self.sock.close()
+                sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            self.sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+        with self._lock:
+            self._latest_snap = None
+            self.online_roles = []
 
     def cancel_connect(self) -> None:
         """Отменяет не завершившееся фоновое подключение."""
@@ -561,16 +707,16 @@ class GameClient:
         self._cancel_connect = True
 
     def send_drone_input(self, inp: DroneInput) -> None:
-        if self.connected and self.sock is not None:
-            send_packet(self.sock, {"type": "input", "data": inp.to_dict()})
+        if self.connected and self._sender is not None:
+            self._sender.input(inp.to_dict())
 
     def send_truck_input(self, inp: TruckInput) -> None:
-        if self.connected and self.sock is not None:
-            send_packet(self.sock, {"type": "input", "data": inp.to_dict()})
+        if self.connected and self._sender is not None:
+            self._sender.input(inp.to_dict())
 
     def send_ping(self) -> None:
-        if self.connected and self.sock is not None:
-            send_packet(self.sock, {"type": "ping", "t": time.perf_counter()})
+        if self.connected and self._sender is not None:
+            self._sender.ping()
 
     def pop_latest_snapshot(self) -> Optional[dict]:
         with self._lock:
@@ -578,19 +724,15 @@ class GameClient:
             self._latest_snap = None
             return snap
 
-    def _recv_loop(self) -> None:
-        assert self.sock is not None
-        last_ping = time.perf_counter()
-        while self._running:
-            now = time.perf_counter()
-            if now - last_ping >= 1.5:
-                self.send_ping()
-                last_ping = now
-
-            pkt = recv_packet(self.sock)
+    def _recv_loop(self, sock: socket.socket) -> None:
+        while self._running and self.sock is sock:
+            pkt = recv_packet(sock)
             if pkt is None:
-                self.connected = False
-                self.error_msg = "Соединение с сервером потеряно."
+                if self.sock is sock:
+                    self.connected = False
+                    self.error_msg = "Соединение с сервером потеряно."
+                break
+            if self.sock is not sock:
                 break
             ptype = pkt.get("type")
             if ptype == "state":
@@ -598,5 +740,5 @@ class GameClient:
                     self._latest_snap = pkt.get("snap")
                     self.online_roles = pkt.get("players", [])
             elif ptype == "pong":
-                sent_t = float(pkt.get("t", now))
-                self.ping_ms = max(0.0, ( time.perf_counter() - sent_t ) * 1000.0)
+                sent_t = float(pkt.get("t", time.perf_counter()))
+                self.ping_ms = max(0.0, (time.perf_counter() - sent_t) * 1000.0)

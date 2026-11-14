@@ -27,7 +27,9 @@ def _send(sock: socket.socket, payload: dict) -> None:
 def _recv(sock: socket.socket):
     buf = bytearray()
     while b"\x00" not in buf:
-        chunk = sock.recv(1024)
+        # Do not swallow tunneled application bytes that arrive in the same
+        # TCP segment as the NUL-terminated Accept handshake.
+        chunk = sock.recv(1)
         if not chunk:
             return None
         buf.extend(chunk)
