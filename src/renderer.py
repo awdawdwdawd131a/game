@@ -110,7 +110,8 @@ class SceneRenderer3D:
         # поверх, в полном разрешении).
         self.render_scale = 1.0          # текущий масштаб мира
         self._render_scale_target = 1.0  # желаемый масштаб (1.0 = native)
-        self._frame_ms_avg = 0.0         # сглаженное время кадра
+        self._frame_ms_avg = 0.0         # сглаженное время отрисовки
+        self._total_frame_ms_avg = 0.0   # весь кадр, включая сеть/симуляцию
         self._scale_cooldown = 0.0       # кадры до следующей подстройки
         self._world_surface: Optional[pygame.Surface] = None
         self._world_size = (0, 0)
@@ -609,6 +610,14 @@ class SceneRenderer3D:
         # single-digit FPS to step down once every 30 frames.
         self.render_scale = min(self.render_scale, self._render_scale_target)
 
+    def report_frame_time(self, frame_ms: float) -> None:
+        """Include update, networking and display time in FPS adaptation."""
+        if frame_ms <= 0.0:
+            return
+        frame_ms = min(float(frame_ms), 250.0)
+        old = self._total_frame_ms_avg
+        self._total_frame_ms_avg = frame_ms if old <= 0.0 else old * 0.9 + frame_ms * 0.1
+
     def _update_render_scale(self, frame_ms: float) -> None:
         """
         Подстраивает масштаб под реальную производительность.
@@ -623,14 +632,14 @@ class SceneRenderer3D:
             self._scale_cooldown -= 1.0
             return
         target = self._render_scale_target
-        avg = self._frame_ms_avg
-        if avg > 26.0 and self.render_scale > 0.5:
+        avg = max(self._frame_ms_avg, self._total_frame_ms_avg)
+        if avg > 21.5 and self.render_scale > 0.5:
             # Adapt quickly when performance is extremely poor; normal
             # fluctuations still use a longer cooldown to avoid breathing.
             severe = avg > 60.0
             self.render_scale = max(0.5, self.render_scale - (0.2 if severe else 0.1))
             self._scale_cooldown = 5 if severe else 30
-        elif avg < 15.0 and self.render_scale < target:
+        elif avg < 19.0 and self._frame_ms_avg < 15.0 and self.render_scale < target:
             # Есть запас - возвращаем качество
             self.render_scale = min(target, self.render_scale + 0.1)
             self._scale_cooldown = 45
