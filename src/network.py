@@ -237,6 +237,10 @@ class GameServer:
         self._lock = threading.Lock()
         self._clients: Dict[str, socket.socket] = {}  # role ("drone" | "truck") -> socket
         self._peers: Dict[str, _ServerPeer] = {}
+        # Acknowledgements refer to inputs actually consumed by a simulation
+        # tick, not just bytes received by the networking thread.
+        self._received_input_seq = {"drone": 0, "truck": 0}
+        self._processed_input_seq = {"drone": 0, "truck": 0}
         self._drone_input = DroneInput()
         self._truck_input = TruckInput()
         self._drone_one_shots = {"detonate": False, "ready": False, "pick_modifier": ""}
@@ -334,6 +338,8 @@ class GameServer:
             if assigned_role is not None:
                 self._clients[assigned_role] = sock
                 self._peers[assigned_role] = peer
+                self._received_input_seq[assigned_role] = 0
+                self._processed_input_seq[assigned_role] = 0
                 # Queue welcome before the sim can publish any states.
                 peer.control({"type": "welcome", "role": assigned_role, "server_tick_rate": TICK_RATE})
                 # Reset match cleanly when the second human joins!
@@ -357,6 +363,11 @@ class GameServer:
                 if ptype == "input":
                     data = pkt.get("data", {})
                     with self._lock:
+                        seq = pkt.get("seq", 0)
+                        if isinstance(seq, int) and 0 < seq < 2**53:
+                            self._received_input_seq[assigned_role] = max(
+                                self._received_input_seq[assigned_role], seq
+                            )
                         if assigned_role == "drone":
                             din = DroneInput.from_dict(data)
                             self._acc_drone_yaw += din.yaw_delta
@@ -466,6 +477,10 @@ class GameServer:
                     self.sim.apply_draft_input(d_in, t_in)
                     self.sim.last_event_ru = "Ожидание подключения 2-го игрока по сети..."
 
+                for role in ("drone", "truck"):
+                    if role in self._clients:
+                        self._processed_input_seq[role] = self._received_input_seq[role]
+
                 tick_idx += 1
                 # Broadcast snapshot at 30 Hz (every 2 simulation ticks) for crisp smooth play & low bandwidth
                 if tick_idx % 2 == 0 and self._clients:
@@ -474,6 +489,7 @@ class GameServer:
                         "players": list(self._clients.keys()),
                         "snap": self.sim.get_snapshot(),
                     }
+                    snap_pkt["snap"]["input_ack"] = dict(self._processed_input_seq)
                     frame = encode_packet(snap_pkt)
                     for peer in self._peers.values():
                         peer.state(frame)
@@ -486,13 +502,14 @@ class _ClientSender:
         self._cv = threading.Condition()
         self._running = True
         self._pending: Optional[dict] = None
+        self._pending_seq = 0
         self._ping_requested = False
         self._thread = threading.Thread(target=self._run, daemon=True, name="GameClientSend")
 
     def start(self) -> None:
         self._thread.start()
 
-    def input(self, data: dict) -> None:
+    def input(self, data: dict, seq: int = 0) -> None:
         with self._cv:
             if not self._running:
                 return
@@ -507,6 +524,7 @@ class _ClientSender:
                 if not data.get("pick_modifier"):
                     data["pick_modifier"] = old.get("pick_modifier", "")
             self._pending = data
+            self._pending_seq = max(self._pending_seq, seq)
             self._cv.notify()
 
     def ping(self) -> None:
@@ -546,8 +564,9 @@ class _ClientSender:
                         next_ping = now + 1.5
                         packet = {"type": "ping", "t": now}
                     else:
-                        packet = {"type": "input", "data": self._pending}
+                        packet = {"type": "input", "data": self._pending, "seq": self._pending_seq}
                         self._pending = None
+                        self._pending_seq = 0
                 if not send_packet(self.sock, packet):
                     return
         finally:
@@ -570,6 +589,7 @@ class GameClient:
         self._running = False
         self._recv_thread: Optional[threading.Thread] = None
         self._sender: Optional[_ClientSender] = None
+        self._input_sequence = 0
         # Состояние неблокирующего подключения
         self.connecting: bool = False
         self._connect_thread: Optional[threading.Thread] = None
@@ -665,6 +685,7 @@ class GameClient:
             self.role = resp["role"]
             self.connected = True
             self._running = True
+            self._input_sequence = 0
             self._sender = _ClientSender(s)
             self._sender.start()
             self._recv_thread = threading.Thread(target=self._recv_loop, args=(s,), daemon=True, name="GameClientRecv")
@@ -706,13 +727,19 @@ class GameClient:
         self._connect_result = None
         self._cancel_connect = True
 
-    def send_drone_input(self, inp: DroneInput) -> None:
+    def send_drone_input(self, inp: DroneInput) -> Optional[int]:
         if self.connected and self._sender is not None:
-            self._sender.input(inp.to_dict())
+            self._input_sequence += 1
+            self._sender.input(inp.to_dict(), self._input_sequence)
+            return self._input_sequence
+        return None
 
-    def send_truck_input(self, inp: TruckInput) -> None:
+    def send_truck_input(self, inp: TruckInput) -> Optional[int]:
         if self.connected and self._sender is not None:
-            self._sender.input(inp.to_dict())
+            self._input_sequence += 1
+            self._sender.input(inp.to_dict(), self._input_sequence)
+            return self._input_sequence
+        return None
 
     def send_ping(self) -> None:
         if self.connected and self._sender is not None:

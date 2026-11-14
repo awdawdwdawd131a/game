@@ -30,6 +30,7 @@ from .controls import (
     key_name,
 )
 from .network import GameClient, GameServer, get_all_local_ips, get_local_lan_ip
+from .network_view import NetworkView
 from .net_setup import AutoHostSetup
 from .physics import WorldSimulation
 from .renderer import Camera3D, SceneRenderer3D
@@ -90,6 +91,7 @@ class DesktopGameApp:
         self.hosted_server: Optional[GameServer] = None
         self.net_client: Optional[GameClient] = None
         self._net_has_snapshot = False
+        self._network_view = NetworkView()
         self._draft_navigation_key = None
         # Экран ожидания подключения (не блокирует GUI)
         self.join_target: str = ""
@@ -135,6 +137,8 @@ class DesktopGameApp:
 
     def _cleanup_network(self) -> None:
         self._set_mouse_capture(False)
+        if hasattr(self, "_network_view"):
+            self._network_view.reset()
         if self.auto_host is not None:
             try:
                 self.auto_host.stop()
@@ -161,7 +165,10 @@ class DesktopGameApp:
     def run(self) -> None:
         try:
             while self.running:
-                dt = min(self.clock.tick(60) / 1000.0, 0.05)
+                frame_ms = self.clock.tick(60)
+                if self.state in ("GAME_LOCAL", "GAME_NET"):
+                    self.renderer.report_frame_time(frame_ms)
+                dt = min(frame_ms / 1000.0, 0.05)
                 self._process_events()
                 self._update(dt)
                 self._render()
@@ -603,8 +610,10 @@ class DesktopGameApp:
                 self.sim.apply_snapshot(snap)
                 self._net_has_snapshot = True
                 self._sync_draft_navigation()
+                self._network_view.on_snapshot(self.sim, snap, self.my_role)
             if not self._net_has_snapshot:
                 return
+            self._network_view.advance(dt)
 
             if self.sim.phase != "ACTIVE_ROUND" and self.mouse_captured:
                 self._set_mouse_capture(False)
@@ -614,7 +623,8 @@ class DesktopGameApp:
                 self.net_client.send_drone_input(d_in)
             else:
                 t_in = self.controls.build_truck_input(dt, self.mouse_captured, self.sim.truck_draft_options)
-                self.net_client.send_truck_input(t_in)
+                sequence = self.net_client.send_truck_input(t_in)
+                self._network_view.truck_input(sequence, t_in)
 
             self._trigger_audio_cues()
             self._update_ambient_audio()
@@ -905,14 +915,15 @@ class DesktopGameApp:
             self.screen.blit(err, (cx - err.get_width() // 2, py + 322))
 
     def _render_gameplay(self) -> None:
+        render_sim = self._network_view.render_sim(self.sim) if self.state == "GAME_NET" else self.sim
         if self.my_role == "drone":
-            cam = self.renderer.make_drone_camera(self.sim)
-            proj = self.renderer.render_world(self.screen, self.sim, cam, hide_own_drone=True)
-            self.renderer.draw_drone_hud(self.screen, self.sim, proj)
+            cam = self.renderer.make_drone_camera(render_sim)
+            proj = self.renderer.render_world(self.screen, render_sim, cam, hide_own_drone=True)
+            self.renderer.draw_drone_hud(self.screen, render_sim, proj)
         else:
-            cam = self.renderer.make_truck_camera(self.sim)
-            proj = self.renderer.render_world(self.screen, self.sim, cam, hide_own_drone=False)
-            self.renderer.draw_truck_hud(self.screen, self.sim, proj)
+            cam = self.renderer.make_truck_camera(render_sim)
+            proj = self.renderer.render_world(self.screen, render_sim, cam, hide_own_drone=False)
+            self.renderer.draw_truck_hud(self.screen, render_sim, proj)
 
         fps = self.clock.get_fps()
         perf_text = f"FPS: {fps:.0f} | 3D: {self.renderer.render_scale * 100:.0f}%" if fps > 0 else f"FPS: -- | 3D: {self.renderer.render_scale * 100:.0f}%"
